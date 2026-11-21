@@ -192,7 +192,10 @@ jobs:
             sh -c '
               set -eu
               cp -r /dist /tmp/dist
-              printf tampered >> /tmp/dist/tot-v*-x86_64-unknown-linux-musl.tar.gz
+              # POSIX sh does not glob redirection targets; expand the name first.
+              set -- /tmp/dist/tot-v*-x86_64-unknown-linux-musl.tar.gz
+              test -f "$1"
+              printf tampered >> "$1"
               if TOT_INSTALL_SOURCE_DIR=/tmp/dist sh /install.sh 2>/tmp/install.err; then
                 echo "installer accepted a tampered artifact" >&2
                 exit 1
