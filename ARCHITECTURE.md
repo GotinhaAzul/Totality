@@ -1085,7 +1085,9 @@ form. `tot doctor` prints both sizes.
   worktrees, on a detached HEAD, on a dirty tree, and when no branch or tag
   ever held the paths; it writes `git bundle create --all` to
   `<data-dir>/rewrites/<session>-<time>.bundle` (refused if that is inside the
-  work tree) and records every ref's OID, type and tag metadata; it runs
+  work tree), packs into the same bundle the commits only reflogs hold (which
+  the cleanup would otherwise prune), and records every ref's OID, type and
+  tag metadata; it runs
   `git filter-repo` when installed, else `git filter-branch --index-filter`,
   with paths passed as argv or a NUL-separated literal pathspec file, never as
   shell text; it keeps empty commits so history stays one-to-one. It then runs
@@ -1094,7 +1096,8 @@ form. `tot doctor` prints both sizes.
   tag still holds a path. Any failure puts every ref back at its recorded OID
   and resets the checkout, leaving the bundle. On success it deletes
   `refs/original`, expires reflogs and prunes, so the repository shrinks, and
-  reports old → new OIDs and the pack size. Remote-tracking refs and the
+  reports old → new OIDs, the pack size, and any reflog-only commits kept in
+  the bundle. Remote-tracking refs and the
   stash are not rewritten and are named in the result. Permission is the
   policy's, not the action's: the subject is `git rewrite_history -- <paths>`
   (an `Exec` call), so `normal` and `accept-edits` ask, `deny-all` and plan
@@ -1109,9 +1112,12 @@ form. `tot doctor` prints both sizes.
   `filter-repo` and `git tag -d` are refused with `GIT_DESTRUCTIVE`, and so
   are the standalone rewriters in command position (`git-filter-repo`,
   `git-filter-branch`, `bfg`, `java -jar bfg*.jar`, `python -m
-  git_filter_repo`, also behind `env`, `sudo`, `uvx` and similar), including
-  inside heredoc bodies. A history-rewrite refusal names
-  `rewrite_history`; the others say no harness action performs them. The
+  `git_filter_repo`, also behind `env`, `sudo`, `uvx` and similar), including
+  inside heredoc bodies and shell `-c` / `eval` text (nested `sh`/`bash`/`zsh`
+  and similar are read up to eight levels; deeper is refused as
+  uninspectable).
+  A history-rewrite refusal names `rewrite_history`; the others say no
+  harness action performs them. The
   match is best effort and cannot see a rewrite done inside a script, which is
   why the sanctioned action exists.
 

@@ -235,7 +235,9 @@ impl CallFacts {
                     || (matches!(action.as_str(), "branch" | "worktree") && op == "list");
                 let command = if action == "rewrite_history" {
                     // The paths are the subject: one approval covers exactly
-                    // the history removal the user saw.
+                    // the history removal the user saw. Quote each one, so
+                    // `["a b"]` and `["a", "b"]` cannot produce one subject
+                    // (and one approval key) for two different requests.
                     let mut command = format!("git {action} --");
                     for path in args
                         .get("paths")
@@ -245,7 +247,7 @@ impl CallFacts {
                         .filter_map(Value::as_str)
                     {
                         command.push(' ');
-                        command.push_str(path);
+                        command.push_str(&crate::tools::git::quote(path));
                     }
                     command
                 } else if op.is_empty() {
@@ -1103,6 +1105,30 @@ mod tests {
             cwd,
         );
         assert_ne!(call.approval_key(), other.approval_key());
+        // Paths are quoted, so distinct lists cannot share a subject and an
+        // approval key: `["a b"]` is one file, `["a", "b"]` is two.
+        let spaces_in_one = CallFacts::new(
+            "git",
+            false,
+            &json!({"action": "rewrite_history", "paths": ["a b"]}),
+            cwd,
+        );
+        let two_paths = CallFacts::new(
+            "git",
+            false,
+            &json!({"action": "rewrite_history", "paths": ["a", "b"]}),
+            cwd,
+        );
+        assert_eq!(spaces_in_one.subject(), "git rewrite_history -- 'a b'");
+        assert_eq!(two_paths.subject(), "git rewrite_history -- a b");
+        assert_ne!(spaces_in_one.approval_key(), two_paths.approval_key());
+        let quotes = CallFacts::new(
+            "git",
+            false,
+            &json!({"action": "rewrite_history", "paths": ["it's"]}),
+            cwd,
+        );
+        assert_eq!(quotes.subject(), r"git rewrite_history -- 'it'\''s'");
     }
 
     #[test]

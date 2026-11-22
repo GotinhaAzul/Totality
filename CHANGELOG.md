@@ -14,7 +14,9 @@ release may change defaults when the change is called out below.
   backup bundle under `<data-dir>/rewrites/`, `git filter-repo` (or
   `filter-branch`) with paths passed as data, verification of refs, commit
   metadata, merges and tags, rollback on any mismatch, and an old → new OID
-  report ([#173](https://github.com/GotinhaAzul/Totality/issues/173)). It is
+  report ([#173](https://github.com/GotinhaAzul/Totality/issues/173)). The
+  backup also packs commits only reflogs hold, so the cleanup cannot lose a
+  reset-away or amended commit. It is
   an ordinary permission subject (`git rewrite_history -- <paths>`): the TUI
   asks; headless runs deny it unless an allow rule or `--yolo` opts in.
 - `tot doctor` prints the policy state of `git rewrite_history`.
@@ -23,7 +25,9 @@ release may change defaults when the change is called out below.
 
 - `bash` and `bg` also refuse the standalone history rewriters
   (`git-filter-repo`, `git-filter-branch`, `bfg`, `python -m
-  git_filter_repo`), and the refusal names `rewrite_history` instead of
+  git_filter_repo`), including inside nested `sh -c` / `bash -c` scripts and
+  `eval` text, and
+  the refusal names `rewrite_history` instead of
   telling the model to ask a user a headless session does not have.
 
 ## [0.3.0] - 2026-11-19

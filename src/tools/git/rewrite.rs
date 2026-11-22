@@ -10,7 +10,8 @@
 //!    HEAD, with a dirty tree, with linked worktrees, or when no branch or
 //!    tag holds the paths.
 //! 2. Write `git bundle create --all` under `<data-dir>/rewrites/`, outside
-//!    the work tree, before anything changes.
+//!    the work tree, before anything changes. Commits only reflogs hold are
+//!    packed too: the cleanup prunes them, and `--all` does not include them.
 //! 3. Record every branch and tag: OID, object type, and tag metadata.
 //! 4. Rewrite with `git filter-repo` when it is installed, otherwise
 //!    `git filter-branch --index-filter`. Paths reach either one as data
@@ -23,13 +24,13 @@
 //!    (`refs/original`, reflogs, unreachable objects) so the repository
 //!    actually shrinks, and report old → new OIDs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
-use super::{Run, enclosing_repo, git, git_line, quote, run_env, worktree_paths};
+use super::{Run, enclosing_repo, git, git_line, quote, run, run_env, worktree_paths};
 use crate::tools::{ToolContext, ToolResult};
 
 /// Refs the action rewrites. Remote-tracking refs and the stash are left
@@ -72,7 +73,10 @@ pub(super) fn rewrite_history(ctx: &ToolContext, args: &Value) -> ToolResult {
     let size_before = pack_size(cwd);
 
     let rewrites = ctx.paths.data_dir.join("rewrites");
-    let bundle = match backup(cwd, &rewrites, ctx.artifacts.session_id()) {
+    // Commits only the reflogs hold would be pruned by the cleanup, and
+    // `bundle create --all` does not include them; put them in the bundle.
+    let tips = reflog_only_tips(cwd);
+    let bundle = match backup(cwd, &rewrites, ctx.artifacts.session_id(), &tips) {
         Ok(bundle) => bundle,
         Err(error) => return error,
     };
@@ -126,6 +130,14 @@ pub(super) fn rewrite_history(ctx: &ToolContext, args: &Value) -> ToolResult {
         pack_size(cwd)
     ));
     report.push_str(&cleanup);
+    if !tips.is_empty() {
+        report.push_str(&format!(
+            "kept {} reflog-only commit(s) in the bundle, which gc would have dropped: {}\nto restore one: `git bundle unbundle {}` and then `git branch <name> <oid>`.\n",
+            tips.len(),
+            tips.join(", "),
+            bundle.display()
+        ));
+    }
     let left = outside_scope(cwd);
     if !left.is_empty() {
         report.push_str(&format!(
@@ -332,9 +344,72 @@ fn pack_size(cwd: &Path) -> String {
     format!("{} packed + {} loose", field("size-pack:"), field("size:"))
 }
 
+/// Commits the reflogs hold, distinct.
+fn reflog_tips(cwd: &Path) -> Vec<String> {
+    let mut seen = HashSet::new();
+    git(cwd, &["log", "-g", "--all", "--format=%H"])
+        .stdout
+        .lines()
+        .filter(|line| !line.is_empty() && seen.insert(*line))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The reflog tips no ref reaches: the cleanup's `gc --prune=now` would drop
+/// them, and `bundle create --all` does not include them. Stale entries that
+/// name objects this clone no longer has are skipped.
+fn reflog_only_tips(cwd: &Path) -> Vec<String> {
+    let tips = reflog_tips(cwd);
+    if tips.is_empty() {
+        return tips;
+    }
+    let listed = run(
+        "git",
+        cwd,
+        &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        Some(&format!("{}\n", tips.join("\n"))),
+    );
+    if !listed.ok {
+        // Cannot screen stale entries; keep them all in the bundle, where an
+        // object this clone lacks makes `bundle create` refuse loudly.
+        return tips;
+    }
+    let commits: HashSet<&str> = listed
+        .stdout
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(_, kind)| *kind == "commit")
+        .map(|(oid, _)| oid)
+        .collect();
+    let tips: Vec<String> = tips
+        .into_iter()
+        .filter(|tip| commits.contains(tip.as_str()))
+        .collect();
+    if tips.is_empty() {
+        return tips;
+    }
+    let mut args = vec!["rev-list"];
+    args.extend(tips.iter().map(String::as_str));
+    args.extend(["--not", "--all"]);
+    let reached = git(cwd, &args);
+    if !reached.ok {
+        // Cannot tell which tips the refs hold; keep them all in the bundle.
+        return tips;
+    }
+    let dangling: HashSet<&str> = reached.stdout.lines().collect();
+    tips.into_iter()
+        .filter(|tip| dangling.contains(tip.as_str()))
+        .collect()
+}
+
 /// `git bundle create <rewrites>/<session>-<time>.bundle --all`, refused when
 /// that directory would sit inside the work tree.
-fn backup(cwd: &Path, rewrites: &Path, session: &str) -> Result<PathBuf, ToolResult> {
+fn backup(
+    cwd: &Path,
+    rewrites: &Path,
+    session: &str,
+    tips: &[String],
+) -> Result<PathBuf, ToolResult> {
     if let Err(error) = std::fs::create_dir_all(rewrites) {
         return Err(ToolResult::err(
             "GIT_BACKUP_FAILED",
@@ -367,7 +442,12 @@ fn backup(cwd: &Path, rewrites: &Path, session: &str) -> Result<PathBuf, ToolRes
         .collect();
     let bundle = real.join(format!("{session}-{stamp}.bundle"));
     let target = bundle.to_string_lossy().to_string();
-    let created = git(cwd, &["bundle", "create", &target, "--all"]);
+    let mut args = vec!["bundle", "create", &target, "--all"];
+    // Extra tips are packed but not advertised as refs; `git bundle
+    // unbundle` still writes their objects back, which is how a reflog-only
+    // commit comes back after `gc --prune=now`.
+    args.extend(tips.iter().map(String::as_str));
+    let created = git(cwd, &args);
     if !created.ok || !git(cwd, &["bundle", "verify", &target]).ok {
         let _ = std::fs::remove_file(&bundle);
         return Err(ToolResult::err(
@@ -641,7 +721,8 @@ fn outside_scope(cwd: &Path) -> Vec<String> {
 }
 
 /// Drop what still holds the old objects inside this repository, so the
-/// removed content is really gone; the bundle keeps the only copy.
+/// removed content is really gone; the bundle keeps the only copy of the
+/// pre-rewrite refs and of the reflog-only commits this prunes.
 fn drop_old_history(cwd: &Path) -> String {
     let mut notes = Vec::new();
     for name in refs_under(cwd, &["refs/original"]) {
@@ -830,6 +911,37 @@ mod tests {
                 .contains(&format!("refs/heads/main: {old_main} -> {new_main}")),
             "{}",
             result.content
+        );
+    }
+
+    #[test]
+    fn reflog_only_commits_survive_in_the_bundle() {
+        let root = tempfile::tempdir().unwrap();
+        let (ctx, repo) = fixture(root.path());
+        // A reset-away commit: only the reflog still names it.
+        std::fs::write(repo.join("note.txt"), "only in the reflog\n").unwrap();
+        commit(&repo, "Kept only by the reflog", "Ana");
+        let tip = ok(&repo, &["rev-parse", "HEAD"]);
+        ok(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
+        assert!(ok(&repo, &["log", "-g", "--all", "--format=%H"]).contains(&tip));
+
+        let result = rewrite_history(&ctx, &json!({"paths": ["assets/demo.mp4"]}));
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains(&tip), "{}", result.content);
+        // The cleanup pruned it from the object store...
+        assert!(!git(&repo, &["cat-file", "-e", &tip]).ok, "gc kept {tip}");
+        // ... and the backup bundle is how it comes back.
+        let bundle = std::fs::read_dir(ctx.paths.data_dir.join("rewrites"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .next()
+            .expect("a bundle");
+        ok(&repo, &["bundle", "unbundle", &bundle.to_string_lossy()]);
+        assert_eq!(ok(&repo, &["cat-file", "-t", &tip]), "commit");
+        assert_eq!(
+            ok(&repo, &["show", "-s", "--format=%s", &tip]),
+            "Kept only by the reflog"
         );
     }
 

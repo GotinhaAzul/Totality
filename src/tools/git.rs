@@ -274,7 +274,7 @@ impl Run {
     }
 }
 
-fn quote(arg: &str) -> String {
+pub(crate) fn quote(arg: &str) -> String {
     if !arg.is_empty()
         && arg
             .chars()
@@ -1669,21 +1669,47 @@ fn worktree_remove(ctx: &ToolContext, args: &Value) -> ToolResult {
 
 /// Why a shell command that rewrites or discards git history is refused, or
 /// `None` when it is allowed. Best effort, like the scope gate: it reads each
-/// command in the line, including after `&&`, `;`, `|` and inside heredoc
-/// bodies, and knows the standalone rewriters (`git-filter-repo`, `bfg`,
-/// `python -m git_filter_repo`) as well as the `git` subcommands. It cannot
-/// see a rewrite a script performs internally, which is why removing files
-/// from history has a sanctioned route instead: `git` action
-/// `rewrite_history`.
+/// command in the line, including after `&&`, `;`, `|`, inside heredoc
+/// bodies, and inside `sh -c` / `bash -c` scripts, and knows the standalone
+/// rewriters (`git-filter-repo`, `bfg`, `python -m git_filter_repo`) as well
+/// as the `git` subcommands. It cannot see a rewrite a script performs
+/// internally, which is why removing files from history has a sanctioned
+/// route instead: `git` action `rewrite_history`.
 pub fn destructive_git(command: &str) -> Option<String> {
+    destructive_git_within(command, 0)
+}
+
+/// How deep `-c` scripts are read before the command is refused as opaque.
+const MAX_SHELL_DEPTH: usize = 8;
+
+fn destructive_git_within(command: &str, depth: usize) -> Option<String> {
     let segments = command.split(['\n', ';', '|', '&', '(', ')', '`']);
     for segment in segments {
         let tokens: Vec<String> = segment
             .split_whitespace()
-            .map(|token| token.trim_matches(['"', '\'']).to_string())
+            .map(|token| {
+                // `$'...'` and `$"..."` are quoting, not part of the word.
+                token
+                    .strip_prefix('$')
+                    .unwrap_or(token)
+                    .trim_matches(['"', '\''])
+                    .to_string()
+            })
             .collect();
         if let Some(shape) = standalone_rewriter(&tokens) {
             return Some(history_refusal(shape));
+        }
+        // A rewrite can hide one level down: `bash -c 'git-filter-repo ...'`
+        // has no `git` token, so the scan below would let it through.
+        if let Some(script) = shell_script(&tokens) {
+            if depth >= MAX_SHELL_DEPTH {
+                return Some(format!(
+                    "a shell nested more than {MAX_SHELL_DEPTH} levels deep is refused in bash and bg: nothing inside it can be checked. Run the command itself, without wrapping it in `-c`."
+                ));
+            }
+            if let Some(refusal) = destructive_git_within(&script, depth + 1) {
+                return Some(refusal);
+            }
         }
         let Some(start) = tokens
             .iter()
@@ -1770,27 +1796,66 @@ const REWRITERS: &[&str] = &["git-filter-repo", "git-filter-branch", "bfg"];
 const WRAPPERS: &[&str] = &[
     "sudo", "doas", "env", "exec", "command", "nice", "nohup", "time", "xargs", "uvx", "pipx",
 ];
+/// Programs whose `-c` argument is a script to run.
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish"];
+
+/// Index of the word that runs as the command: `VAR=value` assignments,
+/// wrappers, and their flags (`env -i`, `pipx run`, `uvx --from x`) come
+/// first.
+fn command_index(tokens: &[String]) -> usize {
+    let mut index = 0;
+    while let Some(word) = tokens.get(index) {
+        let base = word.rsplit('/').next().unwrap_or(word);
+        let is_assignment = word.contains('=') && !word.starts_with('-');
+        if is_assignment || WRAPPERS.contains(&base) || word.starts_with('-') || word == "run" {
+            index += 1;
+        } else {
+            break;
+        }
+    }
+    index
+}
+
+/// The script a shell segment runs with `-c`: `bash -lc '...'`, `sh -c
+/// "..."`, `env bash -c ...`. The script is the rest of the segment, because
+/// the tokens have already been split on whitespace.
+fn shell_script(tokens: &[String]) -> Option<String> {
+    let start = command_index(tokens);
+    let program = tokens.get(start)?;
+    let base = program.rsplit('/').next().unwrap_or(program);
+    // `eval` runs its arguments as shell text, so a rewrite can hide there
+    // without any `-c`.
+    if base == "eval" {
+        let script: Vec<&str> = tokens[start + 1..].iter().map(String::as_str).collect();
+        return (!script.is_empty()).then(|| script.join(" "));
+    }
+    if !SHELLS.contains(&base) {
+        return None;
+    }
+    let mut words = tokens[start + 1..].iter();
+    while let Some(word) = words.next() {
+        // `-c`, or a cluster such as `-lc` / `-ec`.
+        if word.starts_with('-') && !word.starts_with("--") && word[1..].contains('c') {
+            let script: Vec<&str> = words.map(String::as_str).collect();
+            return (!script.is_empty()).then(|| script.join(" "));
+        }
+        if !word.starts_with('-') {
+            // A script file or an option argument before `-c`.
+            return None;
+        }
+    }
+    None
+}
 
 /// The rewriter a shell segment runs as its command, if any: `git-filter-repo`,
 /// `bfg`, `java -jar bfg.jar`, `python -m git_filter_repo`, `uvx git-filter-repo`.
 /// Only the command position counts, so `pip install git-filter-repo` or a
 /// path argument that happens to contain the name does not.
 fn standalone_rewriter(tokens: &[String]) -> Option<&'static str> {
-    let mut words = tokens.iter().map(String::as_str).peekable();
-    // Skip `VAR=value` assignments, wrappers, and their flags (`env -i`,
-    // `pipx run`, `uvx --from x`).
-    while let Some(word) = words.peek() {
-        let is_assignment = word.contains('=') && !word.starts_with('-');
-        let base = word.rsplit('/').next().unwrap_or(word);
-        if is_assignment || WRAPPERS.contains(&base) || word.starts_with('-') || *word == "run" {
-            words.next();
-        } else {
-            break;
-        }
-    }
-    let program = words.next()?;
+    let start = command_index(tokens);
+    let program = tokens.get(start)?;
     let base = program.rsplit('/').next().unwrap_or(program);
-    let rest: Vec<&str> = words.collect();
+    let rest: Vec<&str> = tokens[start + 1..].iter().map(String::as_str).collect();
     if REWRITERS.contains(&base) || is_bfg_jar(base) {
         return Some("git-filter-repo / bfg");
     }
@@ -1965,6 +2030,14 @@ mod tests {
             "uvx git-filter-repo --path a",
             "pip install git-filter-repo && git-filter-repo --path a",
             "bash <<'EOF'\ngit filter-branch --index-filter 'git rm --cached a' -- --all\nEOF",
+            "bash -c 'git-filter-repo --path a --invert-paths'",
+            "sh -lc \"bfg --delete-files demo.mp4\"",
+            "env bash -c \"python3 -m git_filter_repo --path a\"",
+            "bash -c \"bash -c 'git-filter-repo --path a'\"",
+            "sudo bash -c 'java -jar bfg-1.14.0.jar --delete-files a'",
+            "bash -c $'git-filter-repo --path a'",
+            "bash -c 'eval git-filter-repo --path a'",
+            "eval 'git filter-branch -- --all'",
         ] {
             assert!(
                 destructive_git(command).is_some(),
@@ -1987,6 +2060,9 @@ mod tests {
             "ls tools/bfg",
             "python3 -m pytest tests/test_filter_repo.py",
             "rm -rf node_modules",
+            "bash -c 'cargo test --quiet'",
+            "bash -c 'pip install git-filter-repo'",
+            "bash -c 'git status'",
         ] {
             let refused = destructive_git(command);
             if command.starts_with("echo") {
@@ -1998,11 +2074,22 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_nested_past_the_limit_is_refused() {
+        let mut command = "git status".to_string();
+        for _ in 0..=MAX_SHELL_DEPTH {
+            command = format!("bash -c '{command}'");
+        }
+        let message = destructive_git(&command).expect("refused");
+        assert!(message.contains("nested more than"), "{message}");
+    }
+
+    #[test]
     fn history_rewrite_refusals_name_the_sanctioned_action() {
         for command in [
             "git filter-branch --tree-filter x",
             "git-filter-repo --path a --invert-paths",
             "bfg --delete-files a",
+            "bash -c 'git-filter-repo --path a'",
         ] {
             let message = destructive_git(command).expect("refused");
             assert!(message.contains("rewrite_history"), "{command}: {message}");
