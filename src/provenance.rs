@@ -714,6 +714,8 @@ pub enum Sensitivity {
     Network,
     OutsideWorkspace,
     ScopeChange,
+    /// Rewrites repository history (`git` action `rewrite_history`).
+    HistoryRewrite,
 }
 
 impl Sensitivity {
@@ -722,6 +724,7 @@ impl Sensitivity {
             Sensitivity::Network => "network",
             Sensitivity::OutsideWorkspace => "outside-workspace path",
             Sensitivity::ScopeChange => "scope change",
+            Sensitivity::HistoryRewrite => "history rewrite",
         }
     }
 }
@@ -831,6 +834,9 @@ pub fn sensitivity(call: &ToolCall, args: &Value, cwd: &Path) -> Option<Sensitiv
         "pr" => Some(Sensitivity::Network),
         "git" => {
             let action = args.get("action").and_then(Value::as_str).unwrap_or("");
+            if action == "rewrite_history" {
+                return Some(Sensitivity::HistoryRewrite);
+            }
             matches!(action, "push" | "fetch" | "pull" | "clone").then_some(Sensitivity::Network)
         }
         _ => None,
@@ -1119,6 +1125,12 @@ mod tests {
                 cwd
             ),
             Some(Sensitivity::OutsideWorkspace)
+        );
+        let rewrite = serde_json::json!({"action": "rewrite_history", "paths": ["a.mp4"]});
+        assert_eq!(
+            sensitivity(&call("git", rewrite.clone()), &rewrite, cwd),
+            Some(Sensitivity::HistoryRewrite),
+            "a history rewrite needs /approve while an untrusted warning is pending"
         );
         assert_eq!(
             sensitivity(

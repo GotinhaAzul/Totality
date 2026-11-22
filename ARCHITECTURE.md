@@ -1078,9 +1078,48 @@ form. `tot doctor` prints both sizes.
   secrets, the workspace path and home directories removed. `/pr confirm`
   pushes only that branch, by explicit refspec, to the branch's existing
   remote (never `--force`, never a new remote) and creates a draft PR. There is no merge action.
+- `rewrite_history` removes `paths` from every branch and tag
+  ([#173](https://github.com/GotinhaAzul/Totality/issues/173)). It is the only
+  history surgery the harness performs, and its guardrails live in the action:
+  it refuses outside a repository root, in a linked worktree or with linked
+  worktrees, on a detached HEAD, on a dirty tree, and when no branch or tag
+  ever held the paths; it writes `git bundle create --all` to
+  `<data-dir>/rewrites/<session>-<time>.bundle` (refused if that is inside the
+  work tree), packs into the same bundle the commits only reflogs hold (which
+  the cleanup would otherwise prune), and records every ref's OID, type and
+  tag metadata; it runs
+  `git filter-repo` when installed, else `git filter-branch --index-filter`,
+  with paths passed as argv or a NUL-separated literal pathspec file, never as
+  shell text; it keeps empty commits so history stays one-to-one. It then runs
+  `git fsck` and compares refs, object types, per-commit author/committer/
+  dates/message/parent count and tag metadata, and checks that no branch or
+  tag still holds a path. Any failure puts every ref back at its recorded OID
+  and resets the checkout, leaving the bundle. On success it deletes
+  `refs/original`, expires reflogs and prunes, so the repository shrinks, and
+  reports old → new OIDs, the pack size, and any reflog-only commits kept in
+  the bundle. Remote-tracking refs and the
+  stash are not rewritten and are named in the result. Permission is the
+  policy's, not the action's: the subject is `git rewrite_history -- <paths>`
+  (an `Exec` call), so `normal` and `accept-edits` ask, `deny-all` and plan
+  mode deny, `yolo` runs it, and rules can allow or deny it. A headless run
+  (`--print`, `tot serve`) cannot ask, so it is denied unless the operator
+  opted in with an allow rule or `--yolo` / `--allow-yolo`, both recorded in
+  the session header. The decision never depends on what the model read; while
+  an untrusted-content warning is pending it is also a provenance-sensitive
+  action. `tot doctor` prints the resulting state.
 - In `bash` and `bg`, `git reset --hard`, `git clean -f`, `git push --force`
-  (and `+ref`, `:ref`, `--delete`), `git rebase`, `filter-branch` and
-  `git tag -d` are refused with `GIT_DESTRUCTIVE`.
+  (and `+ref`, `:ref`, `--delete`), `git rebase`, `git filter-branch`/
+  `filter-repo` and `git tag -d` are refused with `GIT_DESTRUCTIVE`, and so
+  are the standalone rewriters in command position (`git-filter-repo`,
+  `git-filter-branch`, `bfg`, `java -jar bfg*.jar`, `python -m
+  `git_filter_repo`, also behind `env`, `sudo`, `uvx` and similar), including
+  inside heredoc bodies and shell `-c` / `eval` text (nested `sh`/`bash`/`zsh`
+  and similar are read up to eight levels; deeper is refused as
+  uninspectable).
+  A history-rewrite refusal names `rewrite_history`; the others say no
+  harness action performs them. The
+  match is best effort and cannot see a rewrite done inside a script, which is
+  why the sanctioned action exists.
 
 ### 6.2b Hunk review
 

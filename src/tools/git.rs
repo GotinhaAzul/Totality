@@ -8,8 +8,13 @@
 //! harness made. Every mutation returns the exact command and its output.
 //!
 //! History surgery (`reset --hard`, `clean -f`, `push --force`, `rebase`,
-//! `filter-branch`, tag deletion) is not an action here, and
-//! [`destructive_git`] refuses it in `bash` and `bg` too.
+//! tag deletion) is not an action here, and [`destructive_git`] refuses it in
+//! `bash` and `bg` too. Removing files from history is the one exception: it
+//! is the `rewrite_history` action ([`rewrite`]), whose backup, verification
+//! and rollback run in the action itself, and whose permission is the policy's
+//! (it asks in `normal` mode like any other mutation).
+
+mod rewrite;
 
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -60,7 +65,7 @@ impl Tool for GitTool {
     }
 
     fn description(&self) -> &'static str {
-        "Gated git: stage, unstage, commit_message (style + draft), commit (user approves), branch, worktree, undo. Read status/diff/log/blame with bash."
+        "Gated git: stage, unstage, commit_message (style + draft), commit (user approves), branch, worktree, undo, rewrite_history (remove paths from every branch and tag, with backup and verification). Read status/diff/log/blame with bash."
     }
 
     fn schema(&self) -> Value {
@@ -68,9 +73,9 @@ impl Tool for GitTool {
             json!({
                 "action": {
                     "type": "string",
-                    "enum": ["stage", "unstage", "commit_message", "commit", "branch", "worktree", "undo"],
+                    "enum": ["stage", "unstage", "commit_message", "commit", "branch", "worktree", "undo", "rewrite_history"],
                 },
-                "paths": {"type": "array", "items": {"type": "string"}, "description": "stage/unstage: workspace files."},
+                "paths": {"type": "array", "items": {"type": "string"}, "description": "stage/unstage: workspace files. rewrite_history: files or directories to remove from all history."},
                 "path": {"type": "string", "description": "worktree add: directory."},
                 "message": {"type": "string", "description": "commit: subject, blank line, body saying why."},
                 "op": {"type": "string", "enum": ["create", "switch", "list", "add", "remove"], "description": "branch: create|switch|list; worktree: add|remove|list."},
@@ -110,7 +115,7 @@ fn dispatch(ctx: &ToolContext, config: &GitConfig, args: &Value) -> ToolResult {
         );
     }
     let mutating = match action.as_str() {
-        "stage" | "unstage" | "commit" | "undo" => true,
+        "stage" | "unstage" | "commit" | "undo" | "rewrite_history" => true,
         "branch" | "worktree" => {
             !matches!(optional_str(args, "op").as_deref(), Some("list") | None)
         }
@@ -146,10 +151,11 @@ fn dispatch(ctx: &ToolContext, config: &GitConfig, args: &Value) -> ToolResult {
         "branch" => branch(ctx, args),
         "worktree" => worktree(ctx, args),
         "undo" => undo(ctx),
+        "rewrite_history" => rewrite::rewrite_history(ctx, args),
         other => ToolResult::err(
             "invalid_args",
             format!(
-                "unknown git action {other:?}; use stage, unstage, commit_message, commit, branch, worktree or undo. For status, diff, log, or blame use bash with the git command."
+                "unknown git action {other:?}; use stage, unstage, commit_message, commit, branch, worktree, undo or rewrite_history. For status, diff, log, or blame use bash with the git command."
             ),
         ),
     }
@@ -268,7 +274,7 @@ impl Run {
     }
 }
 
-fn quote(arg: &str) -> String {
+pub(crate) fn quote(arg: &str) -> String {
     if !arg.is_empty()
         && arg
             .chars()
@@ -1663,14 +1669,48 @@ fn worktree_remove(ctx: &ToolContext, args: &Value) -> ToolResult {
 
 /// Why a shell command that rewrites or discards git history is refused, or
 /// `None` when it is allowed. Best effort, like the scope gate: it reads each
-/// `git` invocation in the command line, including after `&&`, `;` and `|`.
+/// command in the line, including after `&&`, `;`, `|`, inside heredoc
+/// bodies, and inside `sh -c` / `bash -c` scripts, and knows the standalone
+/// rewriters (`git-filter-repo`, `bfg`, `python -m git_filter_repo`) as well
+/// as the `git` subcommands. It cannot see a rewrite a script performs
+/// internally, which is why removing files from history has a sanctioned
+/// route instead: `git` action `rewrite_history`.
 pub fn destructive_git(command: &str) -> Option<String> {
+    destructive_git_within(command, 0)
+}
+
+/// How deep `-c` scripts are read before the command is refused as opaque.
+const MAX_SHELL_DEPTH: usize = 8;
+
+fn destructive_git_within(command: &str, depth: usize) -> Option<String> {
     let segments = command.split(['\n', ';', '|', '&', '(', ')', '`']);
     for segment in segments {
         let tokens: Vec<String> = segment
             .split_whitespace()
-            .map(|token| token.trim_matches(['"', '\'']).to_string())
+            .map(|token| {
+                // `$'...'` and `$"..."` are quoting, not part of the word.
+                token
+                    .strip_prefix('$')
+                    .unwrap_or(token)
+                    .trim_matches(['"', '\''])
+                    .to_string()
+            })
             .collect();
+        if let Some(shape) = standalone_rewriter(&tokens) {
+            return Some(history_refusal(shape));
+        }
+        // A rewrite can hide one level down: `bash -c 'git-filter-repo ...'`
+        // has no `git` token, so the scan below would let it through.
+        if let Some(script) = shell_script(&tokens) {
+            if depth >= MAX_SHELL_DEPTH {
+                return Some(format!(
+                    "a shell nested more than {MAX_SHELL_DEPTH} levels deep is refused in bash and bg: nothing inside it can be checked. Run the command itself, without wrapping it in `-c`."
+                ));
+            }
+            if let Some(refusal) = destructive_git_within(&script, depth + 1) {
+                return Some(refusal);
+            }
+        }
         let Some(start) = tokens
             .iter()
             .position(|token| token.rsplit('/').next() == Some("git"))
@@ -1730,19 +1770,116 @@ pub fn destructive_git(command: &str) -> Option<String> {
             "rebase" if !(has("--abort") || has("--quit")) => {
                 Some(("git rebase", "it rewrites commit history"))
             }
-            "filter-branch" | "filter-repo" => {
-                Some(("git filter-branch", "it rewrites the whole history"))
-            }
+            "filter-branch" | "filter-repo" => return Some(history_refusal("git filter-branch")),
             "tag" if has("-d") || has("--delete") => Some(("git tag -d", "it deletes a tag")),
             _ => None,
         };
         if let Some((shape, why)) = reason {
             return Some(format!(
-                "`{shape}` is refused: {why}. Use the git tool (stage, commit, branch, undo) for ordinary changes; if this operation is really needed, ask the user to run it themselves."
+                "`{shape}` is refused in bash and bg: {why}. Use the git tool (stage, commit, branch, undo) for ordinary changes. No harness action performs this one; if it is really needed, say so and stop, because a person has to run it outside the session. Do not edit files under .git to get the same effect."
             ));
         }
     }
     None
+}
+
+/// The refusal for a whole-history rewrite: it names the sanctioned action.
+fn history_refusal(shape: &str) -> String {
+    format!(
+        "`{shape}` is refused in bash and bg: history surgery is not available through the shell, where nothing backs it up or checks the result. To remove files from every branch and tag, call the git tool with {{\"action\":\"rewrite_history\",\"paths\":[...]}}: it writes a backup bundle, verifies every commit and tag, and rolls back on any mismatch. It needs the user's approval (or an allow rule, or --yolo); when the session cannot ask, it is denied, and the right move is to report that and stop. Do not install another rewriter or edit files under .git to get the same effect."
+    )
+}
+
+/// Program names that only exist to rewrite history.
+const REWRITERS: &[&str] = &["git-filter-repo", "git-filter-branch", "bfg"];
+/// Prefixes that run the next word as the command.
+const WRAPPERS: &[&str] = &[
+    "sudo", "doas", "env", "exec", "command", "nice", "nohup", "time", "xargs", "uvx", "pipx",
+];
+/// Programs whose `-c` argument is a script to run.
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish"];
+
+/// Index of the word that runs as the command: `VAR=value` assignments,
+/// wrappers, and their flags (`env -i`, `pipx run`, `uvx --from x`) come
+/// first.
+fn command_index(tokens: &[String]) -> usize {
+    let mut index = 0;
+    while let Some(word) = tokens.get(index) {
+        let base = word.rsplit('/').next().unwrap_or(word);
+        let is_assignment = word.contains('=') && !word.starts_with('-');
+        if is_assignment || WRAPPERS.contains(&base) || word.starts_with('-') || word == "run" {
+            index += 1;
+        } else {
+            break;
+        }
+    }
+    index
+}
+
+/// The script a shell segment runs with `-c`: `bash -lc '...'`, `sh -c
+/// "..."`, `env bash -c ...`. The script is the rest of the segment, because
+/// the tokens have already been split on whitespace.
+fn shell_script(tokens: &[String]) -> Option<String> {
+    let start = command_index(tokens);
+    let program = tokens.get(start)?;
+    let base = program.rsplit('/').next().unwrap_or(program);
+    // `eval` runs its arguments as shell text, so a rewrite can hide there
+    // without any `-c`.
+    if base == "eval" {
+        let script: Vec<&str> = tokens[start + 1..].iter().map(String::as_str).collect();
+        return (!script.is_empty()).then(|| script.join(" "));
+    }
+    if !SHELLS.contains(&base) {
+        return None;
+    }
+    let mut words = tokens[start + 1..].iter();
+    while let Some(word) = words.next() {
+        // `-c`, or a cluster such as `-lc` / `-ec`.
+        if word.starts_with('-') && !word.starts_with("--") && word[1..].contains('c') {
+            let script: Vec<&str> = words.map(String::as_str).collect();
+            return (!script.is_empty()).then(|| script.join(" "));
+        }
+        if !word.starts_with('-') {
+            // A script file or an option argument before `-c`.
+            return None;
+        }
+    }
+    None
+}
+
+/// The rewriter a shell segment runs as its command, if any: `git-filter-repo`,
+/// `bfg`, `java -jar bfg.jar`, `python -m git_filter_repo`, `uvx git-filter-repo`.
+/// Only the command position counts, so `pip install git-filter-repo` or a
+/// path argument that happens to contain the name does not.
+fn standalone_rewriter(tokens: &[String]) -> Option<&'static str> {
+    let start = command_index(tokens);
+    let program = tokens.get(start)?;
+    let base = program.rsplit('/').next().unwrap_or(program);
+    let rest: Vec<&str> = tokens[start + 1..].iter().map(String::as_str).collect();
+    if REWRITERS.contains(&base) || is_bfg_jar(base) {
+        return Some("git-filter-repo / bfg");
+    }
+    if base == "java"
+        && rest
+            .iter()
+            .any(|arg| is_bfg_jar(arg.rsplit('/').next().unwrap_or(arg)))
+    {
+        return Some("git-filter-repo / bfg");
+    }
+    let python = base.starts_with("python") || base == "py";
+    if python
+        && let Some(index) = rest.iter().position(|arg| *arg == "-m")
+        && rest
+            .get(index + 1)
+            .is_some_and(|module| module.contains("filter_repo"))
+    {
+        return Some("python -m git_filter_repo");
+    }
+    None
+}
+
+fn is_bfg_jar(name: &str) -> bool {
+    name.starts_with("bfg") && name.ends_with(".jar")
 }
 
 /// Summaries of the staged and branch state used by the `pr` tool and tests.
@@ -1883,6 +2020,24 @@ mod tests {
             "git filter-branch --tree-filter x",
             "git tag -d v1.0",
             "bash -c \"git reset --hard\"",
+            "git filter-repo --path a --invert-paths",
+            "git-filter-repo --path assets/demo.mp4 --invert-paths --force",
+            "~/.local/bin/git-filter-repo --path a",
+            "FILTER_BRANCH_SQUELCH_WARNING=1 git-filter-branch --all",
+            "bfg --delete-files demo.mp4",
+            "java -jar /opt/bfg-1.14.0.jar --strip-blobs-bigger-than 1M",
+            "python3 -m git_filter_repo --path a --invert-paths",
+            "uvx git-filter-repo --path a",
+            "pip install git-filter-repo && git-filter-repo --path a",
+            "bash <<'EOF'\ngit filter-branch --index-filter 'git rm --cached a' -- --all\nEOF",
+            "bash -c 'git-filter-repo --path a --invert-paths'",
+            "sh -lc \"bfg --delete-files demo.mp4\"",
+            "env bash -c \"python3 -m git_filter_repo --path a\"",
+            "bash -c \"bash -c 'git-filter-repo --path a'\"",
+            "sudo bash -c 'java -jar bfg-1.14.0.jar --delete-files a'",
+            "bash -c $'git-filter-repo --path a'",
+            "bash -c 'eval git-filter-repo --path a'",
+            "eval 'git filter-branch -- --all'",
         ] {
             assert!(
                 destructive_git(command).is_some(),
@@ -1901,6 +2056,13 @@ mod tests {
             "git tag v1.0",
             "echo git reset --hard is bad > notes.txt",
             "grep -r 'reset' src",
+            "pip install git-filter-repo",
+            "ls tools/bfg",
+            "python3 -m pytest tests/test_filter_repo.py",
+            "rm -rf node_modules",
+            "bash -c 'cargo test --quiet'",
+            "bash -c 'pip install git-filter-repo'",
+            "bash -c 'git status'",
         ] {
             let refused = destructive_git(command);
             if command.starts_with("echo") {
@@ -1909,6 +2071,32 @@ mod tests {
             }
             assert!(refused.is_none(), "{command} must be allowed: {refused:?}");
         }
+    }
+
+    #[test]
+    fn a_shell_nested_past_the_limit_is_refused() {
+        let mut command = "git status".to_string();
+        for _ in 0..=MAX_SHELL_DEPTH {
+            command = format!("bash -c '{command}'");
+        }
+        let message = destructive_git(&command).expect("refused");
+        assert!(message.contains("nested more than"), "{message}");
+    }
+
+    #[test]
+    fn history_rewrite_refusals_name_the_sanctioned_action() {
+        for command in [
+            "git filter-branch --tree-filter x",
+            "git-filter-repo --path a --invert-paths",
+            "bfg --delete-files a",
+            "bash -c 'git-filter-repo --path a'",
+        ] {
+            let message = destructive_git(command).expect("refused");
+            assert!(message.contains("rewrite_history"), "{command}: {message}");
+            assert!(!message.contains("ask the user"), "{message}");
+        }
+        let reset = destructive_git("git reset --hard").expect("refused");
+        assert!(!reset.contains("ask the user"), "{reset}");
     }
 
     #[test]
