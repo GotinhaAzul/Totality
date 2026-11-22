@@ -973,6 +973,12 @@ async fn run_doctor(config: &Config, paths: &Paths, json: bool, fix: bool) -> Re
         config.model_profile().1.edit_mode,
         &[],
     ) {
+        let has_git = selection.tools.iter().any(|tool| tool.name() == "git");
+        manifest.history_rewrite = Some(crate::doctor::history_rewrite_state(
+            &config.permissions,
+            &paths.cwd,
+            has_git,
+        ));
         let (full_chars, short_chars) = crate::tools::schema_sizes(&selection.tools);
         manifest.tool_schemas = Some(crate::doctor::SchemaSizes {
             full_chars,

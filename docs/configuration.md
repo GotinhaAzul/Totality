@@ -488,6 +488,21 @@ once and suits unattended runs; headless `--print` has no way to approve, so
 a larger git work tree instead of at its root, `/commit` and the `git` tool's
 mutating actions refuse and change nothing.
 
+`git` action `rewrite_history` (removing files from all history) has no
+`[git]` switch: it is a permission subject, `git rewrite_history -- <paths>`.
+`normal` asks, `deny-all` denies, `--yolo` runs it, and headless runs that
+cannot ask deny it. An operator who wants unattended rewrites adds a rule:
+
+```toml
+[[permissions.rules]]
+id = "history-rewrite"
+tool = "git"
+command = '^git rewrite_history '
+action = "allow"   # or "deny" to forbid it even under --yolo
+```
+
+`tot doctor` prints the state this resolves to.
+
 ## Permissions
 
 Every tool call is checked against `[permissions]` before it runs. Policy is

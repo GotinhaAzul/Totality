@@ -67,6 +67,38 @@ pub struct DoctorManifest {
     /// gets `min(window / 4, 32768)` instead of the 4096 default.
     pub output_tokens: Option<u32>,
     pub output_source: Option<String>,
+    /// The policy state of the `git` action `rewrite_history` under the
+    /// configured mode and rules: `allowed`, `ask …`, `deny …`, or
+    /// `unavailable …` when the profile has no `git` tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_rewrite: Option<String>,
+}
+
+/// How the permission policy treats `git` action `rewrite_history`, for
+/// `tot doctor`. `has_git` is whether the active profile carries the tool.
+pub fn history_rewrite_state(
+    permissions: &crate::policy::PermissionsConfig,
+    cwd: &Path,
+    has_git: bool,
+) -> String {
+    use crate::policy::{CallFacts, Decision, Policy};
+    if !has_git {
+        return "unavailable (the active profile has no git tool; bash refuses history rewrites)"
+            .into();
+    }
+    let policy = match Policy::compile(&permissions.rules) {
+        Ok(policy) => policy,
+        Err(error) => return format!("unknown ({error})"),
+    };
+    let args = serde_json::json!({"action": "rewrite_history", "paths": ["<path>"]});
+    let facts = CallFacts::new("git", false, &args, cwd);
+    match policy.decide_explained(permissions.mode, &facts) {
+        (Decision::Allow, layer) => format!("allowed ({layer})"),
+        (Decision::Ask(_), layer) => format!(
+            "ask ({layer}): the TUI prompts; tot serve and other runs that cannot ask deny it unless an allow rule or --yolo applies"
+        ),
+        (Decision::Deny { .. }, layer) => format!("deny ({layer})"),
+    }
 }
 
 /// Verify configuration as `tot doctor` reports it.
@@ -430,6 +462,7 @@ impl DoctorManifest {
             verify: None,
             output_tokens: None,
             output_source: None,
+            history_rewrite: None,
         }
     }
 
@@ -529,6 +562,9 @@ impl DoctorManifest {
                 "tool schemas: {} · full {} chars · short {} chars\n",
                 sizes.setting, sizes.full_chars, sizes.short_chars
             ));
+        }
+        if let Some(state) = &self.history_rewrite {
+            out.push_str(&format!("git rewrite_history: {state}\n"));
         }
         match &self.tool_probe {
             Some(probe) => out.push_str(&format!(
@@ -855,6 +891,7 @@ mod tests {
             verify: None,
             output_tokens: None,
             output_source: None,
+            history_rewrite: None,
         }
     }
 

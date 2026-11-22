@@ -233,7 +233,22 @@ impl CallFacts {
                 let op = str_arg("op").unwrap_or_default();
                 let reads = GIT_READ_ACTIONS.contains(&action.as_str())
                     || (matches!(action.as_str(), "branch" | "worktree") && op == "list");
-                let command = if op.is_empty() {
+                let command = if action == "rewrite_history" {
+                    // The paths are the subject: one approval covers exactly
+                    // the history removal the user saw.
+                    let mut command = format!("git {action} --");
+                    for path in args
+                        .get("paths")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                    {
+                        command.push(' ');
+                        command.push_str(path);
+                    }
+                    command
+                } else if op.is_empty() {
                     format!("git {action}")
                 } else {
                     format!("git {action} {op}")
@@ -817,6 +832,12 @@ pub fn preview(tool: &str, args: &Value, cwd: &Path, max_lines: usize) -> Option
             let current = std::fs::read_to_string(full).unwrap_or_default();
             (current, str_arg("content")?.to_string())
         }
+        "git" if str_arg("action") == Some("rewrite_history") => {
+            return Some(
+                "rewrites every branch and tag so these paths never existed. A backup bundle is written first, every commit and tag is verified, and any mismatch rolls back; on success the old objects are pruned from this repository (the bundle keeps them). Nothing is pushed."
+                    .into(),
+            );
+        }
         _ => return None,
     };
     let diff = similar::TextDiff::from_lines(&old, &new);
@@ -1025,6 +1046,63 @@ mod tests {
             policy.decide(PermissionMode::Ask, &bash("git log -3")),
             Decision::Allow
         );
+    }
+
+    #[test]
+    fn history_rewrite_is_decided_by_mode_and_rules_only() {
+        let cwd = Path::new("/work/project");
+        let args = json!({"action": "rewrite_history", "paths": ["assets/demo.mp4"]});
+        let call = CallFacts::new("git", false, &args, cwd);
+        assert_eq!(
+            call.subject(),
+            "git rewrite_history -- assets/demo.mp4",
+            "the approval names the exact paths"
+        );
+        assert_eq!(call.effect, Effect::Exec);
+        let none = Policy::default();
+        assert!(matches!(
+            none.decide(PermissionMode::Ask, &call),
+            Decision::Ask(_)
+        ));
+        assert!(matches!(
+            none.decide(PermissionMode::AcceptEdits, &call),
+            Decision::Ask(_)
+        ));
+        assert!(matches!(
+            none.decide(PermissionMode::DenyAll, &call),
+            Decision::Deny { .. }
+        ));
+        assert!(matches!(
+            none.decide(PermissionMode::Plan, &call),
+            Decision::Deny { .. }
+        ));
+        assert_eq!(none.decide(PermissionMode::Yolo, &call), Decision::Allow);
+        // The operator opt-in is a rule; a deny rule still wins over --yolo.
+        let allow = Policy::compile(&[rule(
+            Some("git"),
+            Some("^git rewrite_history "),
+            RuleAction::Allow,
+        )])
+        .unwrap();
+        assert_eq!(allow.decide(PermissionMode::Ask, &call), Decision::Allow);
+        let deny = Policy::compile(&[rule(
+            Some("git"),
+            Some("^git rewrite_history"),
+            RuleAction::Deny,
+        )])
+        .unwrap();
+        assert!(matches!(
+            deny.decide(PermissionMode::Yolo, &call),
+            Decision::Deny { .. }
+        ));
+        // Another approval does not cover different paths.
+        let other = CallFacts::new(
+            "git",
+            false,
+            &json!({"action": "rewrite_history", "paths": ["src"]}),
+            cwd,
+        );
+        assert_ne!(call.approval_key(), other.approval_key());
     }
 
     #[test]
