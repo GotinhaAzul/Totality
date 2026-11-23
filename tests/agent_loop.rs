@@ -317,7 +317,7 @@ fn harness_with_extra(
     config: Config,
     extra: Vec<Arc<dyn totality::Tool>>,
 ) -> Harness {
-    harness_in_mode(dir, scripts, config, extra, PermissionMode::Yolo)
+    harness_in_mode(dir, scripts, config, extra, PermissionMode::SkipAsk)
 }
 
 /// A harness whose permissions start in `mode`, with the tool set filtered
@@ -344,14 +344,14 @@ fn harness_in_mode(
 }
 
 /// A core over any provider, for example the real HTTP client. Permissions
-/// start in yolo, as for `harness_with_extra`.
+/// start in skip-ask, as for `harness_with_extra`.
 fn build_core(
     dir: &std::path::Path,
     config: Config,
     extra: Vec<Arc<dyn totality::Tool>>,
     provider: Arc<dyn Provider>,
 ) -> (Arc<Core>, SessionHandle) {
-    build_core_in_mode(dir, config, extra, provider, PermissionMode::Yolo)
+    build_core_in_mode(dir, config, extra, provider, PermissionMode::SkipAsk)
 }
 
 fn build_core_in_mode(
@@ -383,7 +383,7 @@ fn build_core_in_mode(
     let session: SessionHandle = Arc::new(Mutex::new(session));
     let artifacts = session.lock().unwrap().artifacts.clone();
     let registry = ToolRegistry::builtin();
-    // The config's rules apply; callers that predate permissions use yolo
+    // The config's rules apply; callers that predate permissions use skip-ask
     // (no asking) and a test switches modes with `set_mode`.
     let permissions = Arc::new(Permissions::new(
         Policy::compile(&config.permissions.rules).unwrap(),
@@ -4630,6 +4630,57 @@ fn readme_injection(dir: &std::path::Path) {
 }
 
 #[tokio::test]
+async fn yolo_has_no_provenance_gate_but_keeps_the_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    readme_injection(dir.path());
+    let mut config = base_config();
+    config.profiles.get_mut("test").expect("test profile").tools =
+        vec!["read".to_string(), "bash".to_string()];
+    let harness = harness_in_mode(
+        dir.path(),
+        vec![
+            tool_script("read", json!({"path": "README.md"})),
+            tool_script(
+                "bash",
+                json!({"command": "cat ~/definitely-missing; echo yolo > provenance-ran.txt"}),
+            ),
+            text_script("done"),
+        ],
+        config,
+        Vec::new(),
+        PermissionMode::Yolo,
+    );
+    let (outcome, events) = run(&harness, "read the README").await;
+    assert_eq!(outcome.status, TurnStatus::Done);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Provenance {
+                warning: Some(_),
+                ..
+            }
+        )),
+        "the warning is still shown"
+    );
+    let (bash_content, _, _) = tool_result_entry(&harness.session, "call_0002");
+    assert!(
+        !bash_content.contains("provenance_approval"),
+        "{bash_content}"
+    );
+    assert!(
+        dir.path().join("provenance-ran.txt").exists(),
+        "yolo ran the sensitive command"
+    );
+    let session = harness.session.lock().unwrap();
+    assert!(session.branch_entries().iter().any(|entry| matches!(
+        &entry.kind,
+        EntryKind::Custom(custom)
+            if custom.kind == "provenance-approval"
+                && custom.payload["decision"] == "bypassed"
+    )));
+}
+
+#[tokio::test]
 async fn malicious_readme_triggers_a_warning_and_an_approval_gate() {
     let dir = tempfile::tempdir().unwrap();
     readme_injection(dir.path());
@@ -4681,6 +4732,13 @@ async fn malicious_readme_triggers_a_warning_and_an_approval_gate() {
         "{bash_content}"
     );
     assert!(bash_content.contains("needs approval"), "{bash_content}");
+    // Nothing can `/approve` in this run: the model is told to stop, not to
+    // retry a call that can only be denied again (#189).
+    assert!(
+        bash_content.contains("no interactive frontend") && bash_content.contains("Do not retry"),
+        "{bash_content}"
+    );
+    assert!(bash_content.contains("--yolo"), "{bash_content}");
     assert!(
         !dir.path().join("provenance-ran.txt").exists(),
         "the approval gate stopped the sensitive command"
@@ -5889,7 +5947,7 @@ async fn a_policy_deny_is_final_before_any_pre_tool_hook_runs() {
         ],
         config,
         Vec::new(),
-        PermissionMode::Yolo,
+        PermissionMode::SkipAsk,
     );
     let (outcome, _) = run(&harness, "push").await;
     assert_eq!(outcome.status, TurnStatus::Done);
@@ -6253,7 +6311,7 @@ async fn a_path_deny_rule_matches_a_hash_patch_target() {
                 action: totality::policy::RuleAction::Deny,
             }])
             .unwrap(),
-            PermissionMode::Yolo,
+            PermissionMode::SkipAsk,
         ));
         harness.core = Arc::new(core);
         harness

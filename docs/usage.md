@@ -186,7 +186,7 @@ Write `@path` in a prompt to attach a file: `fix the panic in @src/parser.rs`. T
 
 Slash commands: `/help /quit /login /model /profile /theme /tree /rewind /fork /init /new /resume /sessions /compact /tools /mcp /skill /workflow /sec /trust /commit /pr /plan /permissions /export /clear /debug`.
 
-Every tool call passes a permission policy first. The default level `normal` runs read-only calls and asks before edits and commands, showing the exact command or path and a diff; `y` approves exactly that call for the session. `/permissions` opens a picker with one line per level — `normal`, `accept-edits` (edits run, commands ask), `deny-all` (anything that would ask is denied), and `yolo` (no approvals; deny rules still apply) — and `/permissions <level>` sets one directly. The footer spells out a non-default level (`deny-all: anything that would ask is denied`), `yolo` needs a one-key confirmation and is never written to the config, and `/plan` keeps its own command: mutating tools are removed and refused at dispatch until `/plan approve`. Modes, rules, and `--yolo` are in [configuration.md](configuration.md#permissions).
+Every tool call passes a permission policy first. The default level `normal` runs read-only calls and asks before edits and commands, showing the exact command or path and a diff; `y` approves exactly that call for the session. `/permissions` opens a picker with one line per level — `normal`, `accept-edits` (edits run, commands ask), `deny-all` (anything that would ask is denied), `skip-ask` (no approvals; deny rules and destructive-command guards still apply), and `yolo` (no restrictions: no approvals, deny rules, provenance approval, or destructive git guard) — and `/permissions <level>` sets one directly. The footer spells out a non-default level (`deny-all: anything that would ask is denied`), `skip-ask` and `yolo` need a one-key confirmation and are never written to the config, and `/plan` keeps its own command: mutating tools are removed and refused at dispatch until `/plan approve`. Modes, rules, and `--yolo` are in [configuration.md](configuration.md#permissions).
 
 ### Headless
 
@@ -199,7 +199,7 @@ tot --continue                  # most recent session
 tot --resume 20261107-201500-1234
 ```
 
-`--print` streams text to stdout, diagnostics to stderr, and exits with the turn status: `0` done, `1` error/blocked, `2` budget/stalled, `130` cancelled. `--json` emits newline-delimited events for scripts and CI. A headless run cannot answer a permission prompt, so calls that would ask are denied: pass `--mode accept-edits` or `--mode deny-all`, add allow rules, or use `--yolo` (explicit, recorded in the session).
+`--print` streams text to stdout, diagnostics to stderr, and exits with the turn status: `0` done, `1` error/blocked, `2` budget/stalled, `130` cancelled. `--json` emits newline-delimited events for scripts and CI. A headless run cannot answer a permission prompt, so calls that would ask are denied: pass `--mode accept-edits` or `--mode deny-all`, add allow rules, or use `--skip-ask` or `--yolo` (explicit, recorded in the session). Only `--yolo` gets past a provenance approval, which nothing in a headless run can give.
 
 ### Local HTTP API
 

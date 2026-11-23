@@ -85,10 +85,14 @@ impl App {
                 true,
             ));
         }
-        if self.pending_mode_confirm.is_some() {
+        if let Some(mode) = self.pending_mode_confirm {
             return Some(Attention::new(
-                "Confirm yolo",
-                "every call runs without asking",
+                &format!("Confirm {}", mode.label()),
+                if mode.unrestricted() {
+                    "no approvals, deny rules, or guards"
+                } else {
+                    "every call runs without asking"
+                },
                 "y confirm · any key cancels",
                 true,
             ));

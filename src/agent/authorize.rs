@@ -8,7 +8,7 @@
 //!    exact subject, or deny with a code and reason;
 //! 2. `pre_tool` lifecycle hooks, which may block or add context;
 //! 3. instruction provenance, which gates a sensitive call while an untrusted
-//!    warning is pending.
+//!    warning is pending (off under `yolo`, which only records the bypass).
 //!
 //! A deny from any source wins and stops the call at once; a policy deny
 //! skips the hooks entirely. Hooks and provenance can only deny or add
@@ -161,6 +161,13 @@ pub async fn decide(core: &Core, tool: &dyn Tool, call: &ToolCall, args: &Value)
 
     // Provenance: an untrusted warning gates the next sensitive action. When
     // nothing can approve it, deny now; otherwise resolve after the gates.
+    // `yolo` is unrestricted: the warning stays visible, the gate is off.
+    if core.permissions.mode().unrestricted() {
+        if let Some(required) = provenance::assess(core, call, args) {
+            provenance::bypass(core, call, required.sensitivity);
+        }
+        return verdict;
+    }
     if let Some(required) = provenance::assess(core, call, args) {
         if required.certain_denial(core) {
             if let Gate::Deny { code, message } =
@@ -228,7 +235,7 @@ pub async fn confirm(
         return Err(ToolResult::err(
             "DENIED",
             format!(
-                "{} ({}) needs approval{} but this run cannot ask (mode {}, no interactive frontend). The call did not run. The user can add an allow rule under [permissions], or rerun with --mode accept-edits or --yolo.",
+                "{} ({}) needs approval{} but this run cannot ask (mode {}, no interactive frontend). The call did not run. The user can add an allow rule under [permissions], or rerun with --mode accept-edits, --skip-ask, or --yolo.",
                 request.tool,
                 request.subject,
                 request

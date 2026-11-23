@@ -471,7 +471,14 @@ fn complete_argument(
             Candidate::new("normal", "read-only runs; edits and commands ask"),
             Candidate::new("accept-edits", "edits run, commands ask"),
             Candidate::new("deny-all", "anything that would ask is denied"),
-            Candidate::new("yolo", "no approvals; deny rules still apply"),
+            Candidate::new(
+                "skip-ask",
+                "no approvals; deny rules and destructive-command guards still apply",
+            ),
+            Candidate::new(
+                "yolo",
+                "no restrictions: no approvals, deny rules, or guards",
+            ),
             Candidate::new("why", "which layer allowed or denied the last calls"),
         ],
         ("pr", []) => vec![
@@ -696,13 +703,20 @@ mod tests {
         let completion = complete("/resume 2026", COMMANDS, &src, false).unwrap();
         assert_eq!(completion.candidates[0].description, "fix the parser");
 
-        // `/permissions` completes its four levels.
+        // `/permissions` completes its five levels.
         let completion = complete("/permissions d", COMMANDS, &src, false).unwrap();
         assert_eq!(values(&completion), vec!["deny-all"]);
         let completion = complete("/permissions ", COMMANDS, &src, false).unwrap();
         assert_eq!(
             values(&completion),
-            vec!["normal", "accept-edits", "deny-all", "yolo", "why"]
+            vec![
+                "normal",
+                "accept-edits",
+                "deny-all",
+                "skip-ask",
+                "yolo",
+                "why"
+            ]
         );
     }
 

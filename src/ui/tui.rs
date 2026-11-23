@@ -88,7 +88,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("plan", "plan mode: investigate and propose, change nothing"),
     (
         "permissions",
-        "choose what runs without asking: normal, accept-edits, deny-all, yolo",
+        "choose what runs without asking: normal, accept-edits, deny-all, skip-ask, yolo",
     ),
     ("tools", "show the active tools"),
     ("mcp", "show MCP server status"),
@@ -151,7 +151,7 @@ fn command_usage(name: &str) -> &'static str {
         "pr" => "/pr [confirm|cancel]   (no argument: show the pending action)",
         "plan" => "/plan [approve|exit]   (no argument: enter plan mode, or show the plan)",
         "permissions" => {
-            "/permissions [normal|accept-edits|deny-all|yolo|why]   (no argument: pick; why: what decided the last calls)"
+            "/permissions [normal|accept-edits|deny-all|skip-ask|yolo|why]   (no argument: pick; why: what decided the last calls)"
         }
         "export" => "/export [path]",
         _ => "",
@@ -163,7 +163,7 @@ Commands: /help [command] /quit /login [endpoint] [model] [api-key] /model [name
 [model-profile] /profile [name] /theme [name|save] /tree /rewind [turns] [force] /fork /new
 /resume [id|last] /sessions /compact /tools /mcp
 /commit [confirm|cancel|edit <message>] /pr [confirm|cancel] /plan [approve|exit]
-/permissions [normal|accept-edits|deny-all|yolo]
+/permissions [normal|accept-edits|deny-all|skip-ask|yolo]
 /skill [name] /workflow [name] /sec [...] /approve /trust [confirm] /export [path]
 /clear /debug
 A command that chooses from a list opens a picker when run without an
@@ -494,7 +494,7 @@ struct App {
     repaint: bool,
     /// A permission question from the running turn, waiting for y/n.
     pending_ask: Option<permission::PendingAsk>,
-    /// A level waiting for the one-key confirmation (`yolo`).
+    /// A level waiting for the one-key confirmation (`skip-ask`, `yolo`).
     pending_mode_confirm: Option<crate::policy::PermissionMode>,
     /// The attention the bell last rang for.
     attention_rung: Option<String>,

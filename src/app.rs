@@ -332,18 +332,22 @@ pub async fn create_runtime(
     {
         tracing::warn!(%error, "cannot record the permission mode in the session");
     }
-    if permissions.mode() == crate::policy::PermissionMode::Yolo {
-        // Config files cannot select yolo; only the explicit flag reaches here.
+    let mode = permissions.mode();
+    if mode.explicit_only() {
+        // Config files cannot select these; only the explicit flag reaches here.
+        let label = mode.label();
         if let Err(error) = session.append(EntryKind::Custom(
             CustomData::new("permission-mode")
-                .with("mode", "yolo")
-                .with("source", "--yolo"),
+                .with("mode", label)
+                .with("source", format!("--{label}")),
         )) {
-            tracing::warn!(%error, "cannot record --yolo in the session");
+            tracing::warn!(%error, "cannot record --{label} in the session");
         }
-        session.warnings.push(
-            "--yolo: every tool call runs without asking; only deny rules still apply".into(),
-        );
+        session.warnings.push(if mode.unrestricted() {
+            "--yolo: no restrictions; every tool call runs without asking, and deny rules, the provenance approval, and the destructive git guard are off".into()
+        } else {
+            "--skip-ask: every tool call runs without asking; deny rules, the provenance approval, and the destructive git guard still apply".into()
+        });
     }
     session.warnings.extend(startup_warnings);
     let recorded_redact = session.header().map(|header| header.redact).unwrap_or(true);

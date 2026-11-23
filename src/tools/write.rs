@@ -503,6 +503,7 @@ pub(crate) fn test_context(dir: &Path) -> ToolContext {
         vision: Default::default(),
         caps: Default::default(),
         format_on_edit: false,
+        unrestricted: false,
     }
 }
 

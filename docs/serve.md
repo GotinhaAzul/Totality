@@ -55,7 +55,8 @@ puts the file wherever you want, and the server removes it when it stops.
 | `--bind IP:PORT` | `127.0.0.1:0` | Listen address. Port `0` picks a free port. `localhost:PORT` means `127.0.0.1`. Host names are refused so the loopback check cannot be fooled by DNS. |
 | `--allow-non-loopback` | off | Required for any address that is not loopback (`0.0.0.0`, a LAN IP). Prints a warning: anyone who can reach the port and read the token drives the harness, and plain HTTP carries the token unencrypted. Prefer an SSH tunnel. |
 | `--token-file PATH` | `<data dir>/serve/token-<port>` | Where the token is written, created with mode `0600` (its directory `0700`). A stale regular file is replaced; a symlink is refused. The file is removed when the server stops. |
-| `--allow-yolo` | off | Lets a session request `"permission_mode": "yolo"`. |
+| `--allow-skip-ask` | off | Lets a session request `"permission_mode": "skip-ask"`. |
+| `--allow-yolo` | off | Lets a session request `"permission_mode": "yolo"` (and `"skip-ask"`). |
 
 The global flags apply as usual: `--endpoint`, `--model`, `--profile`,
 `--sandbox`, `--engagement`, `--trust`, `--no-session`, `--no-redact`, `--debug`.
@@ -163,7 +164,7 @@ session picks its mode when it is created, and that mode is installed on the
 session's permission engine before the runtime is built. The engine is the
 single pre-dispatch decision point (`authorize::decide()`): config
 `[permissions]` rules decide first, and the mode only fills in when no rule
-matches. A deny rule always wins. The mode never widens a harness gate
+matches. A deny rule always wins, except under `yolo`. The mode never widens a harness gate
 (read-before-edit, scope, path jail, sandbox), which still runs afterward.
 
 | `permission_mode` | Runs | Denied |
@@ -171,7 +172,8 @@ matches. A deny rule always wins. The mode never widens a harness gate
 | `normal` (default; alias `ask`) | built-in read-only tools (`read`, `grep`, `glob`, `repo_map`, `recall`, `review`, `lsp`, `skill`, `todo`, `thread`), plus any call an allow rule names | everything else |
 | `accept-edits` | the above plus `write`, `edit`, `patch`, `undo` | `bash`, `bg`, `verify`, MCP and external tools |
 | `deny-all` (alias `dont-ask`) | same as `normal` over HTTP | same as `normal` |
-| `yolo` | every call the harness gates allow; needs `tot serve --allow-yolo` | nothing beyond the gates |
+| `skip-ask` | every call the harness gates allow; needs `tot serve --allow-skip-ask` or `--allow-yolo` | deny-rule matches, provenance approvals, and the gates |
+| `yolo` | everything except what the sandbox, path jail, scope, or hooks stop; needs `tot serve --allow-yolo` | only those |
 
 A denied call does not run. The model receives a `DENIED` tool result that
 names the mode, rule, or next action, and the turn continues. MCP and external

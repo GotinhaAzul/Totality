@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 /// How calls that no rule matches are decided.
 ///
 /// The names are the ones users see: `normal`, `accept-edits`, `plan`,
-/// `deny-all`, and `yolo`. Older spellings (`ask`, `dont-ask`) still parse so
+/// `deny-all`, `skip-ask`, and `yolo`. Older spellings (`ask`, `dont-ask`) still parse so
 /// existing config files keep working.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PermissionMode {
@@ -40,18 +40,40 @@ pub enum PermissionMode {
     Plan,
     /// Deny anything that would ask; never prompt.
     DenyAll,
-    /// Run everything a deny rule does not block. Only `--yolo` selects it.
+    /// Run everything a deny rule does not block, without asking. The
+    /// harness guards (provenance approval, the destructive git guard) still
+    /// apply. Only `--skip-ask` or `/permissions skip-ask` selects it.
+    SkipAsk,
+    /// No restrictions: no approvals, no deny rules, no provenance gate, no
+    /// destructive git guard. Only `--yolo` or `/permissions yolo` selects it.
     Yolo,
 }
 
 impl PermissionMode {
     /// The levels `/permissions` offers, in order. Plan keeps its own command.
-    pub const LEVELS: [PermissionMode; 4] = [
+    pub const LEVELS: [PermissionMode; 5] = [
         PermissionMode::Ask,
         PermissionMode::AcceptEdits,
         PermissionMode::DenyAll,
+        PermissionMode::SkipAsk,
         PermissionMode::Yolo,
     ];
+
+    /// Whether every call that would ask runs instead (`skip-ask`, `yolo`).
+    pub fn skips_asks(self) -> bool {
+        matches!(self, PermissionMode::SkipAsk | PermissionMode::Yolo)
+    }
+
+    /// Whether the harness guards are off too (`yolo` only).
+    pub fn unrestricted(self) -> bool {
+        self == PermissionMode::Yolo
+    }
+
+    /// Whether only an explicit per-run choice may select this level: a
+    /// config file cannot, and `--mode` points to the dedicated flag.
+    pub fn explicit_only(self) -> bool {
+        self.skips_asks()
+    }
 
     /// The user-facing name, also the canonical config and CLI spelling.
     pub fn label(self) -> &'static str {
@@ -60,6 +82,7 @@ impl PermissionMode {
             PermissionMode::AcceptEdits => "accept-edits",
             PermissionMode::Plan => "plan",
             PermissionMode::DenyAll => "deny-all",
+            PermissionMode::SkipAsk => "skip-ask",
             PermissionMode::Yolo => "yolo",
         }
     }
@@ -71,7 +94,10 @@ impl PermissionMode {
             PermissionMode::AcceptEdits => "edits run, commands ask",
             PermissionMode::Plan => "investigate and propose, change nothing",
             PermissionMode::DenyAll => "anything that would ask is denied",
-            PermissionMode::Yolo => "no approvals; deny rules still apply",
+            PermissionMode::SkipAsk => {
+                "no approvals; deny rules and destructive-command guards still apply"
+            }
+            PermissionMode::Yolo => "no restrictions: no approvals, deny rules, or guards",
         }
     }
 
@@ -83,6 +109,7 @@ impl PermissionMode {
             "accept-edits" | "acceptedits" => Some(PermissionMode::AcceptEdits),
             "plan" => Some(PermissionMode::Plan),
             "deny-all" | "denyall" | "dont-ask" | "dontask" => Some(PermissionMode::DenyAll),
+            "skip-ask" | "skipask" => Some(PermissionMode::SkipAsk),
             "yolo" => Some(PermissionMode::Yolo),
             _ => None,
         }
@@ -527,6 +554,9 @@ impl Policy {
         if mode == PermissionMode::Plan && !plan_allows(call) {
             return (self.decide_inner(mode, call), "plan mode".into());
         }
+        if mode.unrestricted() {
+            return (Decision::Allow, "yolo mode".into());
+        }
         let layer = match self.winner(call) {
             Some(rule) => format!("rule {}", rule.id),
             None => format!("{} mode default", mode.label()),
@@ -545,6 +575,10 @@ impl Policy {
                 ),
             };
         }
+        // yolo is unrestricted: not even a deny rule stops a call.
+        if mode.unrestricted() {
+            return Decision::Allow;
+        }
         let (action, rule) = match self.winner(call) {
             Some(rule) => (rule.action, Some(rule.id.clone())),
             None => (baseline(mode, call.effect), None),
@@ -561,7 +595,7 @@ impl Policy {
                 ),
             },
             RuleAction::Ask => match mode {
-                PermissionMode::Yolo => Decision::Allow,
+                PermissionMode::SkipAsk | PermissionMode::Yolo => Decision::Allow,
                 PermissionMode::DenyAll => Decision::Deny {
                     code: "DENIED".into(),
                     message: format!(
@@ -591,7 +625,7 @@ impl Policy {
 fn baseline(mode: PermissionMode, effect: Effect) -> RuleAction {
     match (effect, mode) {
         (Effect::ReadOnly | Effect::Session, _) => RuleAction::Allow,
-        (_, PermissionMode::Yolo) => RuleAction::Allow,
+        (_, PermissionMode::SkipAsk | PermissionMode::Yolo) => RuleAction::Allow,
         (Effect::Edit, PermissionMode::AcceptEdits) => RuleAction::Allow,
         // Plan refused mutating calls before rules ran.
         (_, PermissionMode::Plan) => RuleAction::Deny,
@@ -933,13 +967,18 @@ mod tests {
             rule(Some("bash"), None, RuleAction::Allow),
         ])
         .unwrap();
-        match policy.decide(PermissionMode::Yolo, &bash("git push origin main")) {
+        match policy.decide(PermissionMode::SkipAsk, &bash("git push origin main")) {
             Decision::Deny { code, message } => {
                 assert_eq!(code, "DENIED");
                 assert!(message.contains("no-push"), "{message}");
             }
             other => panic!("{other:?}"),
         }
+        // yolo has no restrictions: not even a deny rule.
+        assert_eq!(
+            policy.decide(PermissionMode::Yolo, &bash("git push origin main")),
+            Decision::Allow
+        );
         assert_eq!(
             policy.decide(PermissionMode::Ask, &bash("git status --short && make")),
             Decision::Allow
@@ -1079,7 +1118,9 @@ mod tests {
             Decision::Deny { .. }
         ));
         assert_eq!(none.decide(PermissionMode::Yolo, &call), Decision::Allow);
-        // The operator opt-in is a rule; a deny rule still wins over --yolo.
+        assert_eq!(none.decide(PermissionMode::SkipAsk, &call), Decision::Allow);
+        // The operator opt-in is a rule; a deny rule still wins over
+        // --skip-ask, and only --yolo ignores it.
         let allow = Policy::compile(&[rule(
             Some("git"),
             Some("^git rewrite_history "),
@@ -1094,9 +1135,10 @@ mod tests {
         )])
         .unwrap();
         assert!(matches!(
-            deny.decide(PermissionMode::Yolo, &call),
+            deny.decide(PermissionMode::SkipAsk, &call),
             Decision::Deny { .. }
         ));
+        assert_eq!(deny.decide(PermissionMode::Yolo, &call), Decision::Allow);
         // Another approval does not cover different paths.
         let other = CallFacts::new(
             "git",
@@ -1195,15 +1237,16 @@ mod tests {
             Path::new("/w"),
         );
         assert!(matches!(
-            policy.decide(PermissionMode::Yolo, &env),
+            policy.decide(PermissionMode::SkipAsk, &env),
             Decision::Deny { message, .. } if message.contains("secrets")
         ));
         assert!(matches!(
-            policy.decide(PermissionMode::Yolo, &bash("curl https://x")),
+            policy.decide(PermissionMode::SkipAsk, &bash("curl https://x")),
             Decision::Deny { message, .. } if message.contains("offline")
         ));
+        assert_eq!(policy.decide(PermissionMode::Yolo, &env), Decision::Allow);
         assert_eq!(
-            policy.decide(PermissionMode::Yolo, &bash("cargo test")),
+            policy.decide(PermissionMode::SkipAsk, &bash("cargo test")),
             Decision::Allow
         );
     }

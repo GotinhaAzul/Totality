@@ -993,5 +993,22 @@ async fn harness_gates_still_deny_over_http() {
         .await;
     assert_eq!(status, 403, "{refused}");
     assert_eq!(refused["error"]["code"], "mode_not_permitted");
+    let (status, refused) = server
+        .post("/v1/sessions", json!({"permission_mode": "skip-ask"}))
+        .await;
+    assert_eq!(status, 403, "{refused}");
+    assert_eq!(refused["error"]["code"], "mode_not_permitted");
+    server.terminate().await;
+
+    // `--allow-skip-ask` permits skip-ask but not yolo.
+    let mut server = Server::start(&env, &endpoint, &[], &["--allow-skip-ask"]).await;
+    let (status, created) = server
+        .post("/v1/sessions", json!({"permission_mode": "skip-ask"}))
+        .await;
+    assert!((200..300).contains(&status), "{status} {created}");
+    let (status, refused) = server
+        .post("/v1/sessions", json!({"permission_mode": "yolo"}))
+        .await;
+    assert_eq!(status, 403, "{refused}");
     server.terminate().await;
 }

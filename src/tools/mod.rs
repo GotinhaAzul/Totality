@@ -200,6 +200,9 @@ pub struct ToolContext {
     pub caps: crate::context::ResultCaps,
     /// Format edited content with the project's formatter (`[format] on_edit`).
     pub format_on_edit: bool,
+    /// The `yolo` permission mode is active: `bash` and `bg` skip the
+    /// destructive git guard.
+    pub unrestricted: bool,
 }
 
 impl ToolContext {

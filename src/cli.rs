@@ -151,11 +151,19 @@ pub struct Cli {
     /// Permission mode for unmatched calls: normal, accept-edits, plan, or
     /// deny-all. `ask` and `dont-ask` are accepted as deprecated aliases.
     /// Overrides `[permissions] mode`; rules still apply.
-    #[arg(long, global = true, value_name = "MODE", conflicts_with_all = ["yolo", "plan"])]
+    #[arg(long, global = true, value_name = "MODE", conflicts_with_all = ["yolo", "skip_ask", "plan"])]
     pub mode: Option<String>,
 
-    /// Run every tool call without asking; only deny rules still apply.
-    /// Never the default; recorded in the session.
+    /// Run every tool call without asking; deny rules, the provenance
+    /// approval, and the destructive git guard still apply. Never the
+    /// default; recorded in the session.
+    #[arg(long, global = true, conflicts_with_all = ["plan", "yolo"])]
+    pub skip_ask: bool,
+
+    /// No restrictions: every tool call runs without asking, and deny rules,
+    /// the provenance approval, and the destructive git guard are off. The
+    /// sandbox, path jail, engagement scope, and hooks keep their own
+    /// settings. Never the default; recorded in the session.
     #[arg(long, global = true, conflicts_with = "plan")]
     pub yolo: bool,
 
@@ -234,8 +242,12 @@ pub enum Command {
         /// <data dir>/serve/token-<port>.
         #[arg(long, value_name = "PATH")]
         token_file: Option<PathBuf>,
-        /// Let a session request permission_mode "yolo" (every call the
-        /// harness gates allow runs without approval).
+        /// Let a session request permission_mode "skip-ask" (every call
+        /// runs without approval; deny rules and guards still apply).
+        #[arg(long)]
+        allow_skip_ask: bool,
+        /// Let a session request permission_mode "yolo" (no restrictions)
+        /// or "skip-ask".
         #[arg(long)]
         allow_yolo: bool,
     },
@@ -455,6 +467,9 @@ pub async fn run(cli: Cli) -> Result<i32> {
             Some(crate::policy::PermissionMode::Yolo) => {
                 bail!("--mode yolo is not accepted; pass --yolo explicitly")
             }
+            Some(crate::policy::PermissionMode::SkipAsk) => {
+                bail!("--mode skip-ask is not accepted; pass --skip-ask explicitly")
+            }
             Some(mode) => mode,
             None => {
                 bail!(
@@ -465,6 +480,9 @@ pub async fn run(cli: Cli) -> Result<i32> {
     }
     if cli.plan {
         config.permissions.mode = crate::policy::PermissionMode::Plan;
+    }
+    if cli.skip_ask {
+        config.permissions.mode = crate::policy::PermissionMode::SkipAsk;
     }
     if cli.yolo {
         config.permissions.mode = crate::policy::PermissionMode::Yolo;
@@ -533,6 +551,7 @@ pub async fn run(cli: Cli) -> Result<i32> {
         bind,
         allow_non_loopback,
         token_file,
+        allow_skip_ask,
         allow_yolo,
     }) = &cli.command
     {
@@ -545,6 +564,7 @@ pub async fn run(cli: Cli) -> Result<i32> {
             bind: bind.clone(),
             allow_non_loopback: *allow_non_loopback,
             token_file: token_file.clone(),
+            allow_skip_ask: *allow_skip_ask,
             allow_yolo: *allow_yolo,
             engagement: cli.engagement.clone(),
             no_session: config.session.no_session,
