@@ -2165,7 +2165,7 @@ impl StreamAccum {
             finish: None,
             think: super::output::ThinkSplitter::default(),
             content_loop: super::output::RepetitionGuard::default(),
-            reasoning_loop: super::output::RepetitionGuard::default(),
+            reasoning_loop: super::output::RepetitionGuard::reasoning(),
             degenerate: false,
             strip_reasoning: false,
             sent: Instant::now(),
