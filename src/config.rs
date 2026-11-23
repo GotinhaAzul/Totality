@@ -96,6 +96,8 @@ pub struct GatesConfig {
     /// from the project manifest for this session. They run through the
     /// permission policy like any command and are not saved.
     pub verify_detected: bool,
+    /// What happens when a run without a plan edits its third distinct file.
+    pub todo_plan: TodoPlanMode,
 }
 
 impl Default for GatesConfig {
@@ -103,8 +105,23 @@ impl Default for GatesConfig {
         Self {
             auto_settle: true,
             verify_detected: true,
+            todo_plan: TodoPlanMode::default(),
         }
     }
+}
+
+/// `[gates] todo_plan`: the plan gate at the third distinct file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TodoPlanMode {
+    /// The harness records a plan from the files the run changed and lets
+    /// the edit run; a model-written plan replaces it.
+    #[default]
+    Derive,
+    /// Block the edit with `TODO_PLAN` until the model calls `todo plan`.
+    Require,
+    /// No plan gate.
+    Off,
 }
 
 /// `[format]`: run the project's formatter on content `edit`, `patch`, and

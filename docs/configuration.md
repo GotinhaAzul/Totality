@@ -156,6 +156,7 @@ verify_attempts = 2
 [gates]
 auto_settle = true              # the harness runs verify and review when the model settles
 verify_detected = true          # no steps configured: use the ones detected from the manifest
+todo_plan = "derive"            # derive | require | off: the plan gate at the third distinct file
 
 [prompt]
 identity = ""                   # replaces the built-in one-line identity
@@ -748,6 +749,18 @@ panics, tsc, Python tracebacks, pytest, Go, gcc and eslint shapes) are attached
 with three lines of context each and count as read. Only existing files under
 the working directory count; `target/`, `node_modules/`, virtualenvs and build
 output are skipped.
+
+`[gates] todo_plan` decides what happens when a run without a plan edits its
+third distinct file. `derive` (default) records the plan itself from session
+facts and lets the edit run: `change <file>` for each file already changed
+(completed), `change <target>` (in progress), and `verify` (pending) when
+verification is configured. The entry is a normal `todo-state` with
+`source: "harness"`; it follows the run to each new file, is settled when
+the turn ends (changes completed, `verify` completed only after a fresh
+passing verify), and a model
+`todo action="plan"` replaces it for good. `require` keeps the older
+behavior: the edit is refused with `TODO_PLAN` until the model writes a plan.
+`off` removes the gate.
 
 With no configured or accepted steps, `[gates] verify_detected` (default
 `true`) uses the steps detected from the project manifest (`Cargo.toml`,

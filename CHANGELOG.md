@@ -9,6 +9,14 @@ release may change defaults when the change is called out below.
 
 ### Added
 
+- `[gates] todo_plan = "derive" | "require" | "off"`. The default, `derive`,
+  replaces the `TODO_PLAN` block at a run's third distinct file with a plan the
+  harness records from session facts (`change <file>` per changed file, the
+  current target in progress, `verify` pending when configured), tagged
+  `source: "harness"`, and lets the edit run
+  ([#161](https://github.com/GotinhaAzul/Totality/issues/161)). A model
+  `todo plan` replaces it; `todo list` shows the source. `require` keeps the
+  old blocking gate.
 - `review = "auto"` is the new default for hunk review: a single-file mutation
   opens the review when its path is a lockfile, a config or credential file, or
   a CI workflow, or when the new text matches a secret pattern, and multi-file

@@ -1334,6 +1334,27 @@ async fn run_loop(
             }
             match gates::settle(&facts, &mut progress, gate_tools) {
                 SettleDecision::Done => {
+                    if facts.todo_plan_derived {
+                        let settled = gates::settled_derived_plan(
+                            &facts,
+                            gate_tools.verify && verify_configured,
+                        );
+                        let mut session = core.session.lock().expect("session lock");
+                        let current =
+                            session
+                                .latest_custom_on_path("todo-state")
+                                .and_then(|entry| match &entry.kind {
+                                    EntryKind::Custom(custom) => {
+                                        custom.payload.get("tasks").cloned()
+                                    }
+                                    _ => None,
+                                });
+                        if current.as_ref() != settled.payload.get("tasks")
+                            && let Err(error) = session.append(EntryKind::Custom(settled))
+                        {
+                            tracing::warn!(%error, "cannot record the settled plan");
+                        }
+                    }
                     if gate_tools.verify
                         && verify_configured
                         && facts.unverified_mutations
@@ -2897,6 +2918,14 @@ async fn execute_batch(
     let mut inferred_mutations = 0usize;
     let mut inferred_files: HashSet<String> = HashSet::new();
     let mut plan_present = false;
+    // Files this batch changed, in order and in display form, so a derived
+    // plan lists them as they happened (`inferred_files` is a set).
+    let mut batch_files: Vec<String> = Vec::new();
+    // Whether the latest plan this batch recorded was derived by the harness
+    // (`None`: no plan recorded yet; the session's turn facts decide).
+    let mut batch_plan_derived: Option<bool> = None;
+    let plan_mode = core.config.gates.todo_plan;
+    let plan_verify = gate_tools.verify && !core.config.verify.steps.is_empty();
     let mut guard_trip: Option<(String, String)> = None;
     let mut cancelled = false;
     let mut batch_chars = 0usize;
@@ -3183,20 +3212,58 @@ async fn execute_batch(
                             false,
                             turn_start,
                         );
-                        if gate_tools.todo {
+                        if gate_tools.todo && plan_mode != crate::config::TodoPlanMode::Off {
                             let mut changed_files: Vec<String> = current.files.clone();
-                            changed_files.extend(inferred_files.iter().cloned());
+                            for file in &batch_files {
+                                if !changed_files.contains(file) {
+                                    changed_files.push(file.clone());
+                                }
+                            }
                             let target = args_path
                                 .as_ref()
                                 .and_then(|raw| ctx.resolve(raw).ok())
                                 .map(|path| display_path(&ctx.cwd, &path));
-                            if let Some(block) = gates::todo_edit_gate(
-                                &call.name,
-                                target.as_deref(),
-                                &changed_files,
-                                plan_present || current.todo_plan_present,
-                            ) {
-                                result = block;
+                            let has_plan = plan_present || current.todo_plan_present;
+                            if plan_mode == crate::config::TodoPlanMode::Require {
+                                if let Some(block) = gates::todo_edit_gate(
+                                    &call.name,
+                                    target.as_deref(),
+                                    &changed_files,
+                                    has_plan,
+                                ) {
+                                    result = block;
+                                }
+                            } else {
+                                // Derive: record the plan from session facts
+                                // and let the edit run. A derived plan keeps
+                                // following the run to each new file; a
+                                // model-written plan is never replaced.
+                                let first = gates::plan_gate_fires(
+                                    &call.name,
+                                    target.as_deref(),
+                                    &changed_files,
+                                    has_plan,
+                                );
+                                let derived =
+                                    batch_plan_derived.unwrap_or(current.todo_plan_derived);
+                                let extend = has_plan
+                                    && derived
+                                    && matches!(call.name.as_str(), "edit" | "write" | "patch")
+                                    && target
+                                        .as_ref()
+                                        .is_some_and(|target| !changed_files.contains(target));
+                                if first || extend {
+                                    deferred.push(gates::derived_plan(
+                                        &changed_files,
+                                        target.as_deref(),
+                                        plan_verify,
+                                    ));
+                                    plan_present = true;
+                                    batch_plan_derived = Some(true);
+                                    if first {
+                                        pre_notes.push(gates::DERIVED_PLAN_NOTICE.to_string());
+                                    }
+                                }
                             }
                         }
                     }
@@ -3373,6 +3440,18 @@ async fn execute_batch(
                 .map(|writes| writes[start..].to_vec())
                 .unwrap_or_default();
             if !writes.is_empty() {
+                // The proposal counts as this batch's change for the plan
+                // gate, as an unreviewed write would: review commits it or
+                // reports the rejection.
+                if let Some(path) = &args_path {
+                    let display = ctx
+                        .resolve(path)
+                        .map(|resolved| display_path(&ctx.cwd, &resolved))
+                        .unwrap_or_else(|_| path.clone());
+                    if !batch_files.contains(&display) {
+                        batch_files.push(display);
+                    }
+                }
                 buffered.push(BufferedCall {
                     call: call.clone(),
                     args: evidence_args
@@ -3495,6 +3574,7 @@ async fn execute_batch(
         if executed
             && !result.is_error
             && gate_tools.todo
+            && plan_mode == crate::config::TodoPlanMode::Require
             && !progress.todo_notice_sent
             && matches!(call.name.as_str(), "edit" | "write" | "patch")
             && let Some(path) = &args_path
@@ -3653,6 +3733,10 @@ async fn execute_batch(
                             .is_some_and(|tasks| !tasks.is_empty())
                     {
                         plan_present = true;
+                        batch_plan_derived = Some(
+                            custom.payload.get("source").and_then(|v| v.as_str())
+                                == Some(gates::DERIVED_PLAN_SOURCE),
+                        );
                     }
                     if custom.kind == "fs-change" {
                         changed = true;
@@ -3663,6 +3747,9 @@ async fn execute_batch(
                             inferred_mutations += 1;
                             if !from_bash {
                                 inferred_files.insert(path.to_string());
+                                if !batch_files.iter().any(|file| file == path) {
+                                    batch_files.push(path.to_string());
+                                }
                             }
                         }
                     }
@@ -3699,6 +3786,13 @@ async fn execute_batch(
                 .as_ref()
                 .map(|_| display_path(&ctx.cwd, &ctx.cwd.join(path)))
                 .unwrap_or_else(|| path.clone());
+            let ordered = ctx
+                .resolve(path)
+                .map(|resolved| display_path(&ctx.cwd, &resolved))
+                .unwrap_or_else(|_| display.clone());
+            if !batch_files.contains(&ordered) {
+                batch_files.push(ordered);
+            }
             deferred.push(crate::tools::undo::fs_change_entry(
                 display,
                 tool_result.details.as_ref(),

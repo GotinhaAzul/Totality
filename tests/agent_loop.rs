@@ -2870,21 +2870,54 @@ async fn mentioned_files_reach_the_model_and_count_as_read() {
     );
 }
 
+fn todo_states(session: &SessionHandle) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    let session = session.lock().unwrap();
+    session
+        .branch_entries()
+        .into_iter()
+        .filter_map(|entry| match &entry.kind {
+            EntryKind::Custom(custom) if custom.kind == "todo-state" => {
+                Some(custom.payload.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn task_pairs(state: &serde_json::Map<String, serde_json::Value>) -> Vec<(String, String)> {
+    state["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|task| {
+            (
+                task["content"].as_str().unwrap().to_string(),
+                task["status"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn three_writes() -> Vec<Script> {
+    vec![
+        tool_script("write", json!({"path":"a.txt","content":"a"})),
+        tool_script("write", json!({"path":"b.txt","content":"b"})),
+        tool_script("write", json!({"path":"c.txt","content":"c"})),
+        text_script("done"),
+    ]
+}
+
 #[tokio::test]
-async fn todo_gate_blocks_the_third_mutation() {
+async fn todo_gate_in_require_mode_blocks_the_third_mutation() {
     let dir = tempfile::tempdir().unwrap();
-    let harness = harness(
-        dir.path(),
-        vec![
-            tool_script("write", json!({"path":"a.txt","content":"a"})),
-            tool_script("write", json!({"path":"b.txt","content":"b"})),
-            tool_script("write", json!({"path":"c.txt","content":"c"})),
-            text_script("one"),
-            text_script("two"),
-            text_script("three"),
-        ],
-        &["write", "todo"],
-    );
+    let mut config = base_config();
+    config.profiles.get_mut("test").expect("test profile").tools =
+        vec!["write".into(), "todo".into()];
+    config.gates.todo_plan = totality::config::TodoPlanMode::Require;
+    let mut scripts = three_writes();
+    scripts.pop();
+    scripts.extend([text_script("one"), text_script("two"), text_script("three")]);
+    let harness = harness_config(dir.path(), scripts, config);
     let (outcome, _) = run(&harness, "make three files").await;
     // The third distinct file is refused. The turn settles rather than
     // blocking: the gate has already stopped the edit it was protecting.
@@ -2900,6 +2933,232 @@ async fn todo_gate_blocks_the_third_mutation() {
         results.iter().any(|result| result.contains("TODO_PLAN")),
         "{results:?}"
     );
+}
+
+#[tokio::test]
+async fn the_third_file_gets_a_derived_plan_instead_of_a_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(dir.path(), three_writes(), &["write", "todo"]);
+    let (outcome, _) = run(&harness, "make three files").await;
+    assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
+    assert!(dir.path().join("c.txt").exists(), "the third write runs");
+    let results = tool_results(&harness.session);
+    assert!(
+        results.iter().all(|r| !r.contains("TODO_PLAN")),
+        "{results:?}"
+    );
+    assert!(
+        results
+            .last()
+            .unwrap()
+            .contains("plan derived from changed files"),
+        "{results:?}"
+    );
+    let states = todo_states(&harness.session);
+    assert_eq!(
+        states.len(),
+        2,
+        "derived at c, settled at the end: {states:?}"
+    );
+    assert_eq!(states[0]["source"], "harness");
+    assert_eq!(
+        task_pairs(&states[0]),
+        vec![
+            ("change a.txt".into(), "completed".into()),
+            ("change b.txt".into(), "completed".into()),
+            ("change c.txt".into(), "in_progress".into()),
+        ]
+    );
+    assert_eq!(states[1]["source"], "harness");
+    assert!(
+        task_pairs(&states[1])
+            .iter()
+            .all(|task| task.1 == "completed"),
+        "a settled turn leaves no stale in-progress step: {states:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_derived_plan_follows_the_run_and_ends_with_verify_when_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config();
+    config.profiles.get_mut("test").expect("test profile").tools =
+        vec!["write".into(), "todo".into(), "verify".into()];
+    config.verify = VerifyConfig {
+        steps: vec![VerifyStep {
+            name: "noop".into(),
+            command: vec!["true".into()],
+            timeout_secs: 5,
+        }],
+        ..Default::default()
+    };
+    let mut scripts = three_writes();
+    scripts.pop();
+    scripts.extend([
+        // A re-edit of a planned file leaves the plan alone.
+        tool_script("write", json!({"path":"a.txt","content":"a2"})),
+        tool_script("write", json!({"path":"d.txt","content":"d"})),
+        tool_script("verify", json!({})),
+        text_script("done"),
+    ]);
+    let harness = harness_config(dir.path(), scripts, config);
+    let (outcome, _) = run(&harness, "make four files").await;
+    assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
+    let states = todo_states(&harness.session);
+    assert_eq!(
+        states.len(),
+        3,
+        "derive at c, extend at d, settle: {states:?}"
+    );
+    assert_eq!(
+        task_pairs(&states[2]).last().unwrap(),
+        &("verify".to_string(), "completed".to_string()),
+        "the verify task completes only after a fresh passing verify"
+    );
+    assert_eq!(
+        task_pairs(&states[1]),
+        vec![
+            ("change a.txt".into(), "completed".into()),
+            ("change b.txt".into(), "completed".into()),
+            ("change c.txt".into(), "completed".into()),
+            ("change d.txt".into(), "in_progress".into()),
+            ("verify".into(), "pending".into()),
+        ]
+    );
+    let notices = tool_results(&harness.session)
+        .iter()
+        .filter(|r| r.contains("plan derived from changed files"))
+        .count();
+    assert_eq!(notices, 1, "the notice is sent once");
+}
+
+#[tokio::test]
+async fn a_model_plan_is_never_replaced_by_a_derived_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(
+        dir.path(),
+        vec![
+            tool_script("write", json!({"path":"a.txt","content":"a"})),
+            tool_script(
+                "todo",
+                json!({"action":"plan","tasks":["write files","check"]}),
+            ),
+            tool_script("write", json!({"path":"b.txt","content":"b"})),
+            tool_script("write", json!({"path":"c.txt","content":"c"})),
+            tool_script("write", json!({"path":"d.txt","content":"d"})),
+            text_script("done"),
+        ],
+        &["write", "todo"],
+    );
+    let (outcome, _) = run(&harness, "make files").await;
+    assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
+    let states = todo_states(&harness.session);
+    assert_eq!(states.len(), 1, "{states:?}");
+    assert!(states[0].get("source").is_none());
+}
+
+#[tokio::test]
+async fn a_model_plan_replaces_a_derived_one_and_stops_its_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut scripts = three_writes();
+    scripts.pop();
+    scripts.extend([
+        tool_script("todo", json!({"action":"list"})),
+        tool_script(
+            "todo",
+            json!({"action":"plan","tasks":["finish d","check"]}),
+        ),
+        tool_script("write", json!({"path":"d.txt","content":"d"})),
+        text_script("done"),
+    ]);
+    let harness = harness(dir.path(), scripts, &["write", "todo"]);
+    let (outcome, _) = run(&harness, "make files").await;
+    assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
+    let results = tool_results(&harness.session);
+    assert!(
+        results.iter().any(|r| r.contains("derived by the harness")),
+        "todo list shows the source: {results:?}"
+    );
+    let states = todo_states(&harness.session);
+    let last = states.last().unwrap();
+    assert!(last.get("source").is_none(), "{states:?}");
+    assert_eq!(task_pairs(last)[0].0, "finish d");
+    assert!(
+        states
+            .iter()
+            .all(|state| task_pairs(state).iter().all(|t| t.0 != "change d.txt")),
+        "a model plan is never extended by the harness: {states:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_derived_plan_lists_one_batch_in_call_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(
+        dir.path(),
+        vec![
+            parallel_tool_script(&[
+                ("write", json!({"path":"z.txt","content":"z"})),
+                ("write", json!({"path":"m.txt","content":"m"})),
+                ("write", json!({"path":"a.txt","content":"a"})),
+            ]),
+            text_script("done"),
+        ],
+        &["write", "todo"],
+    );
+    let (outcome, _) = run(&harness, "make files").await;
+    assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
+    let states = todo_states(&harness.session);
+    let names: Vec<String> = task_pairs(&states[0]).into_iter().map(|t| t.0).collect();
+    assert_eq!(names, vec!["change z.txt", "change m.txt", "change a.txt"]);
+}
+
+#[tokio::test]
+async fn reviewed_writes_in_one_batch_still_derive_the_plan() {
+    use totality::tools::hunk::HunkDecision;
+    let dir = tempfile::tempdir().unwrap();
+    let reviewer = scripted_reviewer(vec![HunkDecision::accept_all(3)]);
+    let harness = harness(
+        dir.path(),
+        vec![
+            parallel_tool_script(&[
+                ("write", json!({"path":"a.txt","content":"a"})),
+                ("write", json!({"path":"b.txt","content":"b"})),
+                ("write", json!({"path":"c.txt","content":"c"})),
+            ]),
+            text_script("done"),
+        ],
+        &["write", "todo"],
+    );
+    harness.core.set_reviewer(reviewer.clone());
+    let (outcome, _) = run(&harness, "make files").await;
+    assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
+    assert_eq!(
+        reviewer.requests.lock().unwrap().len(),
+        1,
+        "the batch was reviewed"
+    );
+    let states = todo_states(&harness.session);
+    assert!(
+        !states.is_empty(),
+        "captured proposals count for the plan gate"
+    );
+    let names: Vec<String> = task_pairs(&states[0]).into_iter().map(|t| t.0).collect();
+    assert_eq!(names, vec!["change a.txt", "change b.txt", "change c.txt"]);
+}
+
+#[tokio::test]
+async fn todo_plan_off_records_no_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config();
+    config.profiles.get_mut("test").expect("test profile").tools =
+        vec!["write".into(), "todo".into()];
+    config.gates.todo_plan = totality::config::TodoPlanMode::Off;
+    let harness = harness_config(dir.path(), three_writes(), config);
+    let (outcome, _) = run(&harness, "make three files").await;
+    assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
+    assert!(dir.path().join("c.txt").exists());
+    assert!(todo_states(&harness.session).is_empty());
 }
 
 #[tokio::test]
@@ -6207,7 +6466,11 @@ const TODO_NOTICE: &str =
 #[tokio::test]
 async fn the_mutation_before_the_todo_gate_carries_an_advance_notice() {
     let dir = tempfile::tempdir().unwrap();
-    let harness = harness(
+    let mut config = base_config();
+    config.profiles.get_mut("test").expect("test profile").tools =
+        vec!["write".into(), "todo".into()];
+    config.gates.todo_plan = totality::config::TodoPlanMode::Require;
+    let harness = harness_config(
         dir.path(),
         vec![
             call_script("c1", "write", json!({"path":"a.txt","content":"a"})),
@@ -6217,7 +6480,7 @@ async fn the_mutation_before_the_todo_gate_carries_an_advance_notice() {
             call_script("c5", "write", json!({"path":"d.txt","content":"d"})),
             text_script("done"),
         ],
-        &["write", "todo"],
+        config,
     );
     let (outcome, _) = run(&harness, "make files").await;
     assert_ne!(outcome.status, TurnStatus::Blocked, "{:?}", outcome.error);
