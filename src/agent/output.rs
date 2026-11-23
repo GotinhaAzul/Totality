@@ -179,13 +179,35 @@ const REPEAT_MIN_REPEATS: usize = 5;
 const REPEAT_MAX_PERIOD: usize = 400;
 const REPEAT_CHECK_EVERY: usize = 256;
 
-/// Watches a growing buffer for an exactly repeating tail.
+/// Words in the window the near-loop check reads from the end of reasoning.
+const NEAR_LOOP_WINDOW_WORDS: usize = 600;
+/// The window is a loop when fewer than this share of its word trigrams are
+/// distinct. A loop of P words collapses to about P distinct trigrams, so
+/// this catches cycles up to ~120 words. Ordinary reasoning sits far above
+/// it, and so does a formulaic list with one changing word in every 15.
+const NEAR_LOOP_MAX_DISTINCT: f64 = 0.2;
+/// Bytes read from the end of the buffer to find the window. Bounds the cost
+/// of each check on very long reasoning.
+const NEAR_LOOP_SCAN_BYTES: usize = 32 * 1024;
+
+/// Watches a growing buffer for a repeating tail.
 #[derive(Debug, Default)]
 pub struct RepetitionGuard {
     checked: usize,
+    /// Also stop on near-repetition (see [`near_loop_tail`]). Only safe for
+    /// reasoning: visible content can be legitimately repetitive.
+    near_loops: bool,
 }
 
 impl RepetitionGuard {
+    /// A guard for chain-of-thought: exact loops and near-loops.
+    pub fn reasoning() -> Self {
+        Self {
+            near_loops: true,
+            ..Self::default()
+        }
+    }
+
     /// The byte length to keep when `text` now ends in a degenerate loop.
     /// Checks at most every `REPEAT_CHECK_EVERY` bytes of growth.
     pub fn check(&mut self, text: &str) -> Option<usize> {
@@ -193,7 +215,54 @@ impl RepetitionGuard {
             return None;
         }
         self.checked = text.len();
-        degenerate_tail(text)
+        degenerate_tail(text).or_else(|| {
+            if self.near_loops {
+                near_loop_tail(text)
+            } else {
+                None
+            }
+        })
+    }
+}
+
+/// If the last `NEAR_LOOP_WINDOW_WORDS` words of `text` are a loop that is not
+/// byte-exact (`Good. Good.\nGood! good.`, a few sentences cycling in random
+/// order, a paragraph too long for [`degenerate_tail`]), return the byte
+/// length that keeps everything before the window.
+///
+/// Words are lowercase alphanumeric runs, so whitespace, punctuation and case
+/// noise do not hide a loop. The test is the share of distinct word trigrams.
+pub fn near_loop_tail(text: &str) -> Option<usize> {
+    let mut start = text.len().saturating_sub(NEAR_LOOP_SCAN_BYTES);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = &text[start..];
+    let mut words: Vec<(usize, &str)> = Vec::new();
+    let mut word_start = None;
+    for (at, ch) in tail.char_indices().chain([(tail.len(), ' ')]) {
+        match (ch.is_alphanumeric(), word_start) {
+            (true, None) => word_start = Some(at),
+            (false, Some(begin)) => {
+                words.push((begin, &tail[begin..at]));
+                word_start = None;
+            }
+            _ => {}
+        }
+    }
+    // A word cut by the scan boundary is not a real word; with the window
+    // full it is never inside it anyway.
+    if words.len() < NEAR_LOOP_WINDOW_WORDS {
+        return None;
+    }
+    let window = &words[words.len() - NEAR_LOOP_WINDOW_WORDS..];
+    let lower: Vec<String> = window.iter().map(|(_, w)| w.to_lowercase()).collect();
+    let trigrams = lower.len() - 2;
+    let distinct: std::collections::HashSet<&[String]> = lower.windows(3).collect();
+    if (distinct.len() as f64) < (trigrams as f64) * NEAR_LOOP_MAX_DISTINCT {
+        Some(start + window[0].0)
+    } else {
+        None
     }
 }
 
@@ -911,6 +980,90 @@ mod tests {
         );
         let mut guard = RepetitionGuard::default();
         assert!(guard.check("short").is_none());
+    }
+
+    /// Deterministic picks so the noisy loops are reproducible.
+    fn noisy(count: usize, options: &[&str]) -> String {
+        let mut seed = 7u64;
+        (0..count)
+            .map(|_| {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                options[(seed >> 33) as usize % options.len()]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn near_loops_that_are_not_byte_exact_are_caught_in_reasoning() {
+        let head = "The user wants the parser fixed. Let me look at the tokenizer first.\n";
+        let cases = [
+            noisy(600, &["Good. ", "Good.\n", "Good.  ", "Good.\n\n"]),
+            noisy(600, &["Good. ", "Good! ", "Good, ", "good. "]),
+            noisy(600, &["Good. ", "Good. ", "Okay. ", "Yes. "]),
+            noisy(
+                80,
+                &[
+                    "Wait, let me reconsider the approach to the parser. ",
+                    "Actually, I think the earlier plan was right. ",
+                    "Hmm, let me double-check the tokenizer before editing. ",
+                ],
+            ),
+            // An exact loop with a unit longer than `REPEAT_MAX_PERIOD`.
+            "Let me restate the plan in full before acting on it. First I read the \
+             module, then I trace every caller of the tokenizer, then I compare the \
+             output against the fixture, and only after that do I write the edit. I \
+             should also confirm the error type matches what the caller expects, \
+             because a mismatch there would fail the build. Then I run the tests, review \
+             the diff once more, and summarise the change for the user in one line. "
+                .repeat(12),
+        ];
+        for loop_text in cases {
+            assert!(
+                degenerate_tail(&loop_text).is_none(),
+                "exact guard misses it"
+            );
+            let text = format!("{head}{loop_text}");
+            let keep = near_loop_tail(&text).unwrap_or_else(|| panic!("missed {loop_text:.80?}"));
+            assert!(keep >= head.len() - 1, "kept the reasoning before the loop");
+            assert!(keep < text.len());
+            let mut guard = RepetitionGuard::reasoning();
+            assert!(guard.check(&text).is_some());
+            // Content keeps the exact-only guard.
+            assert!(RepetitionGuard::default().check(&text).is_none());
+        }
+    }
+
+    #[test]
+    fn varied_or_formulaic_reasoning_is_not_a_near_loop() {
+        let vocab = [
+            "the", "parser", "reads", "tokens", "and", "then", "we", "check", "whether", "error",
+            "path", "returns", "early", "so", "caller", "gets", "a", "result", "maybe", "test",
+            "fails", "because", "fixture", "changed", "last", "week", "let", "me", "look", "at",
+            "function", "body", "again", "it", "builds", "tree", "from", "spans", "which", "might",
+            "overlap", "when", "input", "has", "nested", "brackets", "or", "unicode", "escapes",
+            "inside", "strings",
+        ];
+        let options: Vec<String> = vocab.iter().map(|w| format!("{w} ")).collect();
+        let refs: Vec<&str> = options.iter().map(String::as_str).collect();
+        let varied = noisy(2000, &refs);
+        assert!(near_loop_tail(&varied).is_none(), "varied reasoning");
+
+        // Walking a list of files is formulaic, not a loop.
+        let checklist: String = (0..300)
+            .map(|n| format!("Check src/module_{n}.rs: it imports config, fine.\n"))
+            .collect();
+        assert!(near_loop_tail(&checklist).is_none(), "checklist");
+
+        // Code drafted in reasoning.
+        let code: String = (0..200)
+            .map(|n| format!("    assert_eq!(parse(\"{n}\"), Ok({n}));\n"))
+            .collect();
+        assert!(near_loop_tail(&code).is_none(), "code");
+
+        // Too short to judge.
+        assert!(near_loop_tail(&"Good. ".repeat(100)).is_none());
     }
 
     fn one(content: &str) -> (TextCall, String, &'static str) {
