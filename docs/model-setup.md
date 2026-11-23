@@ -427,7 +427,8 @@ the server reported nothing; the harness falls back to the configured
   and the model is asked for smaller calls. If the output-recovery allowance
   runs out with an empty reply the turn ends as a budget stop, never `Done`;
   raise `[model] max_output_tokens` if it repeats.
-- **"repetition guard"**: the model fell into an exact loop and was stopped
-  early. Apply a sampler preset (`qwen-coding`, `gemma-chat`, `glm-agent`),
+- **"repetition guard"**: the model fell into a loop and was stopped early:
+  an exact loop in either stream, or a near-loop in reasoning (the last 600
+  words reuse almost the same word trigrams). Apply a sampler preset (`qwen-coding`, `gemma-chat`, `glm-agent`),
   lower `temperature`, or set `min_p`/`repeat_penalty`/DRY values in the model
   profile. `tot doctor` reports fields the engine omits.
