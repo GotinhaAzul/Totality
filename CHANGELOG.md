@@ -17,7 +17,13 @@ release may change defaults when the change is called out below.
   ([#161](https://github.com/GotinhaAzul/Totality/issues/161)). A model
   `todo plan` replaces it; `todo list` shows the source. `require` keeps the
   old blocking gate.
-
+- `review = "auto"` is the new default for hunk review: a single-file mutation
+  opens the review when its path is a lockfile, a config or credential file, or
+  a CI workflow, or when the new text matches a secret pattern, and multi-file
+  turns behave as before. `always` and `off` remain explicit overrides, and the
+  `hunk-review` session entry records the triggering rule (`trigger`) so the
+  user can see why the modal appeared
+  ([#145](https://github.com/GotinhaAzul/Totality/issues/145)).
 - `git` action `rewrite_history` removes paths from every branch and tag with
   guardrails in the action itself: clean-tree and repository-root checks, a
   backup bundle under `<data-dir>/rewrites/`, `git filter-repo` (or

@@ -935,8 +935,11 @@ pub enum ReviewMode {
     /// Review every mutation before it is written.
     Always,
     /// Review once a turn is about to touch a second file.
-    #[default]
     MultiFile,
+    /// Review a single-file mutation when its path or new text is risky, and
+    /// otherwise once a turn is about to touch a second file.
+    #[default]
+    Auto,
     /// Write immediately, exactly as before the review feature.
     Off,
 }
@@ -946,6 +949,7 @@ impl ReviewMode {
         match self {
             ReviewMode::Always => "always",
             ReviewMode::MultiFile => "multi_file",
+            ReviewMode::Auto => "auto",
             ReviewMode::Off => "off",
         }
     }
@@ -956,6 +960,7 @@ impl ReviewMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "always" => Some(ReviewMode::Always),
             "multi_file" | "multi-file" | "multi" => Some(ReviewMode::MultiFile),
+            "auto" => Some(ReviewMode::Auto),
             "off" | "never" | "none" => Some(ReviewMode::Off),
             _ => None,
         }

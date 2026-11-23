@@ -1127,10 +1127,14 @@ form. `tot doctor` prints both sizes.
 
 ### 6.2b Hunk review
 
-`review = "always" | "multi_file" | "off"` (default `multi_file`) decides
+`review = "auto" | "always" | "multi_file" | "off"` (default `auto`) decides
 whether file mutations wait for the user. The agent loop decides per assistant
-batch: `always` activates on a batch with any mutation, `multi_file` when the
-turn's files (already changed plus this batch) reach two, `off` never.
+batch: `auto` activates when a mutated path is a lockfile, a config or
+credential file, or a CI workflow, or when the new text matches a secret
+pattern, and otherwise when the turn's files (already changed plus this batch)
+reach two; `always` activates on a batch with any mutation; `multi_file`
+activates only at two files; `off` never. `always` and `off` are overrides,
+checked before the risk rule.
 
 With an interactive frontend installed (`Core::reviewer`), active batches run
 `edit`, `patch`, and `write` inside a capture scope. The tools compute their
@@ -1157,8 +1161,10 @@ At the batch's last mutation the loop:
 5. Appends the tool results (partial applications name the rejected file and
    line ranges; a fully rejected call returns `HUNK_REJECTED`), the `fs-change`
    entries with the final hash, and a `hunk-review` custom entry recording the
-   mode, hunk/applied/rejected counts, files, and rejected ranges. Undo uses
-   the same snapshot the tool captured before the review, so it still works.
+   mode, the triggering rule (`risk:lockfile`, `risk:config`,
+   `risk:ci_workflow`, `risk:secret`, `multi_file`, or `always`),
+   hunk/applied/rejected counts, files, and rejected ranges. Undo uses the same
+   snapshot the tool captured before the review, so it still works.
 
 Without a reviewer (`--print`, ACP, workflows), no capture is installed: the
 turn writes immediately, exactly as before the feature, and no review entry is
