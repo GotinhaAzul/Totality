@@ -592,6 +592,10 @@ fn is_lockfile(path: &str) -> bool {
     LOCKFILES.contains(&file_name(path))
 }
 
+fn is_ci_workflow(path: &str) -> bool {
+    path.to_ascii_lowercase().starts_with(".github/workflows/")
+}
+
 fn is_config(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     let name = file_name(&lower);
@@ -612,7 +616,30 @@ fn is_config(path: &str) -> bool {
         || lower.ends_with(".p12")
         || lower.ends_with(".ini")
         || lower.ends_with(".cfg")
-        || lower.starts_with(".github/workflows/")
+        || is_ci_workflow(path)
+}
+
+/// The rule that makes a single-file change worth reviewing before it lands.
+///
+/// Hunk review uses this to decide whether a path needs the same attention the
+/// `review` tool already gives it. The classifiers are shared, so a file can
+/// never be risky for one and ordinary for the other.
+pub fn review_risk(path: &str, new_content: Option<&str>) -> Option<&'static str> {
+    if is_lockfile(path) {
+        return Some("lockfile");
+    }
+    if is_ci_workflow(path) {
+        return Some("ci_workflow");
+    }
+    if is_config(path) {
+        return Some("config");
+    }
+    let content = new_content?;
+    let scanner = Scanner::new();
+    content
+        .lines()
+        .any(|line| scanner.secret_reason(line).is_some())
+        .then_some("secret")
 }
 
 fn is_source_path(path: &str) -> bool {
@@ -1145,6 +1172,33 @@ fn run() { println!(\"debug\"); }\n\
         assert!(is_config("certs/server.pem"));
         assert!(is_config(".github/workflows/ci.yml"));
         assert!(!is_config("src/config_lib.rs"));
+    }
+
+    #[test]
+    fn review_risk_names_the_triggering_rule() {
+        assert_eq!(review_risk("Cargo.lock", None), Some("lockfile"));
+        assert_eq!(review_risk("web/package-lock.json", None), Some("lockfile"));
+        assert_eq!(review_risk(".env", None), Some("config"));
+        assert_eq!(review_risk("deploy/.env.production", None), Some("config"));
+        assert_eq!(
+            review_risk(".github/workflows/ci.yml", None),
+            Some("ci_workflow")
+        );
+        assert_eq!(review_risk("src/lib.rs", None), None);
+        assert_eq!(review_risk("src/lib.rs", Some("let x = 1;\n")), None);
+        assert_eq!(
+            review_risk("src/lib.rs", Some("AWS_KEY = AKIA1234567890ABCDEF\n")),
+            Some("secret")
+        );
+        assert_eq!(
+            review_risk("src/lib.rs", Some("api_key = \"literal-secret\"\n")),
+            Some("secret")
+        );
+        assert_eq!(
+            review_risk("src/lib.rs", Some("api_key = \"${API_KEY}\"\n")),
+            None,
+            "placeholders are not secrets"
+        );
     }
 
     #[test]

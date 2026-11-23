@@ -2533,6 +2533,24 @@ fn mutation_path(args: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
+/// The text a mutating call proposes to add, when the arguments carry it.
+/// `write` sends the full file, `edit` the replacement, and `patch` either a
+/// replacement or hash-mode `ops` text; a secret in any of them is visible
+/// before the file lands.
+fn mutation_new_content(args: &Value) -> Option<String> {
+    for key in ["content", "new", "replacement"] {
+        if let Some(text) = args.get(key).and_then(Value::as_str) {
+            return Some(text.to_string());
+        }
+    }
+    let ops = args.get("ops")?.as_array()?;
+    let text: Vec<&str> = ops
+        .iter()
+        .filter_map(|op| op.get("text").and_then(Value::as_str))
+        .collect();
+    (!text.is_empty()).then(|| text.join("\n"))
+}
+
 /// Calls that will hit the mutating-tool path, after name routing.
 fn mutation_call_indexes(calls: &[ToolCall], active: &[&str]) -> Vec<usize> {
     calls
@@ -2892,11 +2910,12 @@ async fn execute_batch(
     ctx.caps = caps;
     let active: Vec<&str> = core.tools.iter().map(|tool| tool.name()).collect();
 
-    // Hunk review: from a turn's second file mutation (or every mutation in
-    // `always`), run the mutating tools against a capture buffer, ask the
-    // frontend which hunks to keep, and write the accepted ones atomically.
-    // Without a reviewer (headless, ACP) the buffer is not used at all: the
-    // turn behaves exactly as before, which is the documented auto-accept.
+    // Hunk review: from a risky single-file mutation or a turn's second file
+    // mutation (every mutation in `always`), run the mutating tools against a
+    // capture buffer, ask the frontend which hunks to keep, and write the
+    // accepted ones atomically. Without a reviewer (headless, ACP) the buffer
+    // is not used at all: the turn behaves exactly as before, which is the
+    // documented auto-accept.
     let review_mode = core.config.review;
     let reviewer = if review_mode == crate::config::ReviewMode::Off {
         None
@@ -2904,7 +2923,7 @@ async fn execute_batch(
         core.reviewer()
     };
     let mutation_calls = mutation_call_indexes(calls, &active);
-    let mut review_active = false;
+    let mut review_trigger: Option<String> = None;
     if reviewer.is_some() {
         let mut files: HashSet<String> = gates::analyze_turn_since(
             &core.session.lock().expect("session lock"),
@@ -2921,12 +2940,33 @@ async fn execute_batch(
                 files.insert(display_path(&ctx.cwd, &path));
             }
         }
-        review_active = match review_mode {
-            crate::config::ReviewMode::Always => !mutation_calls.is_empty(),
-            crate::config::ReviewMode::MultiFile => files.len() >= 2,
-            crate::config::ReviewMode::Off => false,
+        review_trigger = match review_mode {
+            crate::config::ReviewMode::Always => {
+                (!mutation_calls.is_empty()).then(|| "always".to_string())
+            }
+            crate::config::ReviewMode::MultiFile => {
+                (files.len() >= 2).then(|| "multi_file".to_string())
+            }
+            crate::config::ReviewMode::Auto => {
+                let risk = mutation_calls.iter().find_map(|index| {
+                    let arguments = &calls[*index].arguments;
+                    // A hash-anchored patch carries `path#snapshot`.
+                    let raw = mutation_path(arguments)?;
+                    let raw = raw.split('#').next().unwrap_or(raw);
+                    let path = ctx
+                        .resolve(raw)
+                        .map(|path| display_path(&ctx.cwd, &path))
+                        .unwrap_or_else(|_| raw.to_string());
+                    let content = mutation_new_content(arguments);
+                    crate::tools::review::review_risk(&path, content.as_deref())
+                        .map(|rule| format!("risk:{rule}"))
+                });
+                risk.or_else(|| (files.len() >= 2).then(|| "multi_file".to_string()))
+            }
+            crate::config::ReviewMode::Off => None,
         };
     }
+    let review_active = review_trigger.is_some();
     let capture: Option<crate::tools::hunk::Capture> =
         review_active.then(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
     let last_reviewed = mutation_calls.last().copied();
@@ -3337,6 +3377,7 @@ async fn execute_batch(
                         &mut buffered,
                         reviewer.as_ref().expect("review_active implies a reviewer"),
                         review_mode,
+                        review_trigger.as_deref(),
                         &mut deferred,
                         &mut batch_chars,
                         &mut *progress,
@@ -3706,6 +3747,7 @@ async fn execute_batch(
             &mut buffered,
             reviewer,
             review_mode,
+            review_trigger.as_deref(),
             &mut deferred,
             &mut batch_chars,
             &mut *progress,
@@ -3756,6 +3798,7 @@ async fn finish_review(
     buffered: &mut Vec<BufferedCall>,
     reviewer: &std::sync::Arc<dyn crate::tools::hunk::HunkReviewer>,
     mode: crate::config::ReviewMode,
+    trigger: Option<&str>,
     deferred: &mut Vec<CustomData>,
     batch_chars: &mut usize,
     progress: &mut RunProgress,
@@ -4068,6 +4111,9 @@ async fn finish_review(
         .with("applied", applied)
         .with("rejected", rejected)
         .with("files", files.clone());
+    if let Some(trigger) = trigger {
+        entry = entry.with("trigger", trigger);
+    }
     if !rejected_ranges.is_empty() {
         entry = entry.with("rejected_ranges", rejected_ranges);
     }

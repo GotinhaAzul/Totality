@@ -70,7 +70,7 @@ and `TOT_DATA_DIR` pins the root outright.
 
 ```toml
 default_profile = "coding"      # coding | full | security | minimal | strict | shell | custom
-review = "multi_file"           # always | multi_file | off (see below)
+review = "auto"                 # auto | always | multi_file | off (see below)
 
 [model]
 endpoint = "http://127.0.0.1:8080"
@@ -356,10 +356,19 @@ grammars.
 `review` decides whether `edit`, `patch`, and `write` land immediately or wait
 for the TUI's hunk list:
 
-- `multi_file` (default) opens the review when a turn is about to touch a
-  second file. The first file still lands immediately.
+- `auto` (default) opens the review for a risky single-file change and when a
+  turn is about to touch a second file. Risky means a lockfile, a config or
+  credential file such as `.env`, a CI workflow under `.github/workflows/`, or
+  new content that matches a secret pattern. A safe single-file source edit
+  still lands immediately.
+- `multi_file` opens the review when a turn is about to touch a second file.
+  The first file still lands immediately.
 - `always` reviews every mutation, including a single-file edit.
 - `off` writes immediately, exactly as before the feature existed.
+
+The `hunk-review` session entry records the rule that opened the review as
+`trigger`: `risk:lockfile`, `risk:config`, `risk:ci_workflow`, `risk:secret`,
+`multi_file`, or `always`.
 
 In the review modal, `a` accepts the selected hunk, `r` rejects it, `e` opens
 its replacement text in the prompt (Enter saves, Esc cancels), `A`/`R` accept
