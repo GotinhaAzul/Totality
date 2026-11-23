@@ -559,7 +559,7 @@ impl ProgressLedger {
             }
         } else if self
             .seen_results
-            .insert(result_digest(news(outcome.result)))
+            .insert(result_digest(&news(outcome.result)))
         {
             ProgressEvent::Learned
         } else {
@@ -684,14 +684,36 @@ impl ProgressLedger {
 }
 
 /// The part of a result that is news: the `[tool] name - args` header line
-/// dropped, so different arguments with the same answer tell us nothing new.
-/// Digits stay: a line number, a revision, or a count is often the answer.
-fn news(result: &str) -> &str {
-    match result.split_once('\n') {
+/// dropped, so different arguments with the same answer tell us nothing new,
+/// and session artifact ids (`out-17`) blanked, since a capped preview names a
+/// fresh one every time. Other digits stay: a line number, a revision, or a
+/// count is often the answer.
+fn news(result: &str) -> String {
+    let body = match result.split_once('\n') {
         Some((first, rest)) if first.starts_with("[tool] ") => rest,
         _ if result.starts_with("[tool] ") => "",
         _ => result,
+    };
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(at) = rest.find("out-") {
+        let after = &rest[at + 4..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        let boundary = rest[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !ch.is_alphanumeric() && ch != '-' && ch != '_');
+        if digits > 0 && boundary {
+            out.push_str(&rest[..at]);
+            out.push_str("out-#");
+            rest = &after[digits..];
+        } else {
+            out.push_str(&rest[..at + 4]);
+            rest = after;
+        }
     }
+    out.push_str(rest);
+    out
 }
 
 /// A failure keyed by coarse family and message, with the call's own argument
@@ -1320,6 +1342,43 @@ mod tests {
             ok(&mut progress, cwd, "read", "[tool] read - b.rs\nline 2"),
             ProgressEvent::Learned,
             "a number is often the answer"
+        );
+    }
+
+    #[test]
+    fn a_fresh_artifact_id_is_not_news() {
+        let dir = empty_workspace();
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(limits());
+        let preview = |id: u32| {
+            format!("[tool] read - big.rs\nfn a()\n[truncated; full output in artifact out-{id}]")
+        };
+        assert_eq!(
+            ok(&mut progress, cwd, "read", &preview(3)),
+            ProgressEvent::Learned
+        );
+        assert_eq!(
+            ok(&mut progress, cwd, "read", &preview(4)),
+            ProgressEvent::Idle
+        );
+        assert_eq!(
+            ok(
+                &mut progress,
+                cwd,
+                "read",
+                "[tool] read - x\nlayout-12 vs layout-13"
+            ),
+            ProgressEvent::Learned
+        );
+        assert_eq!(
+            ok(
+                &mut progress,
+                cwd,
+                "read",
+                "[tool] read - y\nlayout-12 vs layout-14"
+            ),
+            ProgressEvent::Learned,
+            "only bare artifact ids are blanked"
         );
     }
 

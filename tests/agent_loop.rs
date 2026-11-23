@@ -2013,6 +2013,45 @@ async fn near_identical_failing_calls_end_the_turn_as_stalled() {
     );
 }
 
+/// A read over the result cap is archived under a fresh artifact id each
+/// time; the same bytes are still not news, so repeating it stalls.
+#[tokio::test]
+async fn repeating_a_capped_read_stalls() {
+    let dir = tempfile::tempdir().unwrap();
+    let body: String = (0..400)
+        .map(|line| format!("line {line} of a long file\n"))
+        .collect();
+    std::fs::write(dir.path().join("big.txt"), body).unwrap();
+    let mut config = base_config();
+    config.profiles.get_mut("test").expect("test profile").tools = vec!["bash".into()];
+    config.budgets.result_cap_chars = Some(600);
+    // `cat` only reads, so the loop guard leaves it to the ledger.
+    let scripts: Vec<Script> = (0..30)
+        .map(|index| {
+            call_script(
+                &format!("read_{index}"),
+                "bash",
+                json!({"command": "cat big.txt"}),
+            )
+        })
+        .chain(std::iter::once(text_script("done")))
+        .collect();
+    let harness = harness_config(dir.path(), scripts, config);
+    let (outcome, _) = run(&harness, "read it").await;
+    let results = tool_results(&harness.session);
+    assert!(
+        results.iter().any(|result| result.contains("out-")),
+        "the read must be capped into an artifact: {:?}",
+        &results[0]
+    );
+    assert_eq!(outcome.status, TurnStatus::Stalled);
+    assert_eq!(
+        results.len(),
+        17,
+        "one new read, eight idle, a pivot, eight more"
+    );
+}
+
 #[tokio::test]
 async fn successful_commands_of_one_family_are_not_a_loop() {
     let dir = tempfile::tempdir().unwrap();

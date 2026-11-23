@@ -3627,12 +3627,14 @@ async fn execute_batch(
         }
 
         let family = tool_family(&call.name, &raw);
+        // The uncapped result: a capped preview names a fresh `out-N`
+        // artifact each time, which would make a repeated read look new.
         let event = progress.record_tool_result(
             &ctx.cwd,
             ToolOutcome {
                 family: &family,
                 arguments: &raw,
-                result: &tool_result.content,
+                result: &result.content,
                 is_error: tool_result.is_error,
                 changed_file: changed,
                 verified_ok,
