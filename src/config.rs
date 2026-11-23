@@ -466,7 +466,7 @@ impl Config {
         }
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.budgets.max_model_calls == 0 {
             bail!("budgets.max_model_calls must be at least 1");
         }
@@ -696,6 +696,63 @@ impl Config {
             table.insert(key.to_string(), value);
         }
         write_config_value(path, &file)
+    }
+
+    /// Write or remove one setting addressed by a dotted key (`review`,
+    /// `ui.bell`, `model.api_key`), preserving every unrelated key. `None`
+    /// removes the key so the built-in default applies again. `private`
+    /// forces mode `0600`, for values that may be secrets.
+    pub fn save_key(
+        path: &Path,
+        key: &str,
+        value: Option<toml::Value>,
+        private: bool,
+    ) -> Result<()> {
+        let mut file = read_config_value(path)?;
+        {
+            let parts: Vec<&str> = key.split('.').collect();
+            let (leaf, sections) = parts.split_last().context("empty setting key")?;
+            let mut table = file.as_table_mut().context("config root is not a table")?;
+            for section in sections {
+                if value.is_none() && !table.contains_key(*section) {
+                    return Ok(());
+                }
+                table = table
+                    .entry(section.to_string())
+                    .or_insert_with(|| toml::Value::Table(Default::default()))
+                    .as_table_mut()
+                    .with_context(|| format!("[{section}] is not a table"))?;
+            }
+            match value {
+                Some(value) => {
+                    table.insert(leaf.to_string(), value);
+                }
+                None => {
+                    table.remove(*leaf);
+                }
+            }
+        }
+        if private {
+            write_private_config_value(path, &file)
+        } else {
+            write_config_value(path, &file)
+        }
+    }
+
+    /// Whether the config file at `path` sets the dotted `key`. A missing or
+    /// unreadable file sets nothing.
+    pub fn file_sets_key(path: &Path, key: &str) -> bool {
+        let Ok(value) = read_toml(path) else {
+            return false;
+        };
+        let mut node = &value;
+        for part in key.split('.') {
+            match node.get(part) {
+                Some(next) => node = next,
+                None => return false,
+            }
+        }
+        true
     }
 
     /// Persist one `[ui]` setting, used by `/theme` and `Ctrl+R`.
@@ -941,9 +998,10 @@ pub enum ReviewMode {
     MultiFile,
     /// Review a single-file mutation when its path or new text is risky, and
     /// otherwise once a turn is about to touch a second file.
-    #[default]
     Auto,
-    /// Write immediately, exactly as before the review feature.
+    /// Write immediately, without a review pause. The default: the undo
+    /// log and the rewind still cover every write.
+    #[default]
     Off,
 }
 

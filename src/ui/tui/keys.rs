@@ -430,7 +430,11 @@ impl App {
                     KeyCode::Home => view.move_by(isize::MIN / 2),
                     KeyCode::End => view.move_by(isize::MAX / 2),
                     KeyCode::Backspace => view.pop_filter(),
-                    KeyCode::Enter => picked = view.selected_item().map(|item| item.action.clone()),
+                    KeyCode::Enter => {
+                        picked = view.selected_item().map(|item| item.action.clone());
+                        self.settings_return = view.command.starts_with("settings")
+                            && matches!(picked, Some(PickAction::Run(_)));
+                    }
                     KeyCode::Char(ch) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
                         view.push_filter(ch);
                     }

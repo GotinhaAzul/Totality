@@ -70,7 +70,7 @@ and `TOT_DATA_DIR` pins the root outright.
 
 ```toml
 default_profile = "coding"      # coding | full | security | minimal | strict | shell | custom
-review = "auto"                 # auto | always | multi_file | off (see below)
+review = "off"                  # off | auto | multi_file | always (see below)
 
 [model]
 endpoint = "http://127.0.0.1:8080"
@@ -238,11 +238,38 @@ extra_body = { chat_template_kwargs = { enable_thinking = true } }
 `TOT_PROFILE` still override it. The built-in default is `coding`. A successful
 `/profile` switch writes this key.
 
-`/theme <name>`, `Ctrl+R`, and a successful `/profile` switch update the global
-config in place: the write is atomic, every unrelated key is preserved, an
-existing file keeps its mode, and a new file is created `0600`. A failed write
-leaves the change active for the session and shows a warning. These commands
-never write permissions; `/permissions` remains session-only.
+`/theme <name>`, `Ctrl+R`, a successful `/profile` switch, and `/settings`
+update the global config in place: the write is atomic, every unrelated key is
+preserved, an existing file keeps its mode, and a new file is created `0600`
+(a secret such as `model.api_key` always leaves the file `0600`). A failed
+write leaves the change active for the session and shows a warning.
+`/permissions` remains session-only.
+
+### `/settings`
+
+`/settings` opens one filterable list of every scalar key in this file, each
+with its current value and what it does. Enter toggles a boolean, opens a
+value list for a fixed choice, or puts `/settings <key> <current value>` in
+the prompt to edit; after a change the list opens again on the same key.
+`ui.theme`, `model.model`, and `default_profile` go through `/theme`, `/model`,
+and `/profile`. Secrets are never shown, only `(set)` or `(empty)`.
+
+```text
+/settings                      the list
+/settings review               a value picker (or the value and how to set it)
+/settings review auto          set and save
+/settings budgets.idle_budget -   restore the built-in default (removes the key)
+/settings where                config files, directories, and collections
+```
+
+A change is validated against the same rules as loading the file, applied to
+the running session (the runtime is rebuilt when the agent reads it), and
+only then saved. Keys read only at startup (`session.*`, `ui.mouse`,
+`model.start_command`) are saved and marked `next launch`. A row also says
+when a `TOT_*` variable or a trusted project config overrides the saved
+value. Collections (`[profile.*]`, `[model_profile.*]`, `[mcp.*]`,
+`[hooks.*]`, `[[permissions.rules]]`, verify steps) are listed by
+`/settings where` and edited in the file or through their commands.
 
 `model_profile = "auto"` matches by model-name prefix declared in `match`; the
 `default` model profile is the fallback. `[model] context_window` is used only
@@ -341,7 +368,9 @@ grammars.
 `review` decides whether `edit`, `patch`, and `write` land immediately or wait
 for the TUI's hunk list:
 
-- `auto` (default) opens the review for a risky single-file change and when a
+- `off` (default) writes immediately. The undo log and `/rewind` still cover
+  every write.
+- `auto` opens the review for a risky single-file change and when a
   turn is about to touch a second file. Risky means a lockfile, a config or
   credential file such as `.env`, a CI workflow under `.github/workflows/`, or
   new content that matches a secret pattern. A safe single-file source edit
@@ -349,7 +378,8 @@ for the TUI's hunk list:
 - `multi_file` opens the review when a turn is about to touch a second file.
   The first file still lands immediately.
 - `always` reviews every mutation, including a single-file edit.
-- `off` writes immediately, exactly as before the feature existed.
+
+`/settings review <mode>` changes it from the TUI.
 
 The `hunk-review` session entry records the rule that opened the review as
 `trigger`: `risk:lockfile`, `risk:config`, `risk:ci_workflow`, `risk:secret`,
