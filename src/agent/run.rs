@@ -1,7 +1,6 @@
 //! One turn: stream the model, run tool batches, enforce guards, settle.
 
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -25,7 +24,7 @@ use crate::tools::{ToolResult, display_path};
 use super::calls::CallLedger;
 use super::gates::{self, LoopDecision, LoopGuard, SettleDecision};
 use super::limits::{
-    BudgetCheck, RunProgress, StopReason, ToolOutcome, call_read_only, tool_family, tool_signature,
+    BudgetCheck, ProgressEvent, RunProgress, StopReason, ToolOutcome, call_read_only, tool_family,
 };
 use super::{AgentEvent, AgentState, Core};
 
@@ -1466,26 +1465,6 @@ async fn run_loop(
             let _ = tx.send(AgentEvent::Notice(reminder.into()));
         }
 
-        if let Some((code, message)) = batch.guard {
-            finish_with_summary(
-                core,
-                tx,
-                cancel,
-                &budget,
-                tool_specs_cost,
-                "the loop guard stopped a repeating run",
-            )
-            .await;
-            append_error(&core.session, &code, &message, true);
-            let _ = tx.send(AgentEvent::Guard {
-                code: code.clone(),
-                message: message.clone(),
-            });
-            // A run the loop guard stopped did not finish its task. Reporting
-            // it as done would exit 0 from `tot -p` and mark a workflow step
-            // succeeded; it is the same outcome as the stall guard.
-            return TurnOutcome::ok(TurnStatus::Stalled);
-        }
         if batch.cancelled {
             append_error(
                 &core.session,
@@ -2490,7 +2469,6 @@ fn handle_stream_item(
 
 struct BatchOutcome {
     cancelled: bool,
-    guard: Option<(String, String)>,
     end_turn: bool,
     thread_split: Option<ThreadSplit>,
     /// Calls rejected by the active profile's one-call rule.
@@ -2880,6 +2858,7 @@ async fn execute_batch(
     let mut inferred_files: HashSet<String> = HashSet::new();
     let mut plan_present = false;
     let mut guard_trip: Option<(String, String)> = None;
+    let mut loop_recorded = false;
     let mut cancelled = false;
     let mut batch_chars = 0usize;
     let mut end_turn = false;
@@ -3647,26 +3626,32 @@ async fn execute_batch(
             ));
         }
 
-        let fingerprint = fingerprint(&call.name, &raw, &tool_result.content);
         let family = tool_family(&call.name, &raw);
-        let signature = tool_signature(&call.name, &raw);
-        let read_only = reads_only(core, &call.name, &raw);
-        progress.record_tool_result(
+        let event = progress.record_tool_result(
             &ctx.cwd,
             ToolOutcome {
-                fingerprint: &fingerprint,
                 family: &family,
-                signature: &signature,
+                arguments: &raw,
                 result: &tool_result.content,
                 is_error: tool_result.is_error,
                 changed_file: changed,
                 verified_ok,
-                read_only,
             },
         );
-        if changed || verified_ok {
-            // A file change or a passing verification is real progress; the
-            // loop guard must not count calls from before it.
+        if let Some((_, reason)) = &guard_trip
+            && !loop_recorded
+        {
+            // The loop guard is certain: it spends the idle budget at once,
+            // and the ledger's one stop rule pivots or ends the turn.
+            loop_recorded = true;
+            progress.record_loop(format!(
+                "{reason} The next step should use a different approach."
+            ));
+        }
+        if matches!(event, ProgressEvent::Changed | ProgressEvent::Verified) {
+            // A file change, a passing verification, or a workspace that moved
+            // under an idle streak is real progress; the loop guard must not
+            // count calls from before it.
             loop_guard.record_progress();
         }
         let _ = tx.send(AgentEvent::ToolFinished {
@@ -3683,7 +3668,10 @@ async fn execute_batch(
                 append_tool_result(
                     &core.session,
                     remaining,
-                    &ToolResult::err("loop_guard", "not executed: the loop guard ended this turn"),
+                    &ToolResult::err(
+                        "loop_guard",
+                        "not executed: the loop guard stopped this batch",
+                    ),
                     None,
                     Some(crate::provenance::tool_tag(&remaining.name)),
                 );
@@ -3724,20 +3712,13 @@ async fn execute_batch(
         }
     }
 
-    // The batch may have changed the workspace after the family guard fired
-    // (a `sed -i`, a script writing a file the harness never saw). Only a trip
-    // that survived the whole batch ends the turn.
+    // The batch may have changed the workspace after the ledger ran out of
+    // idle calls (a `sed -i`, a script writing a file the harness never saw).
+    // Only a stall that survives the whole batch pivots or ends the turn.
     progress.recheck_workspace(&ctx.cwd);
 
-    let guard = guard_trip.map(|(code, reason)| {
-        (
-            code,
-            format!("{reason} End the turn; the next turn should use a different approach."),
-        )
-    });
     BatchOutcome {
         cancelled,
-        guard,
         end_turn,
         thread_split,
         invalid_calls,
@@ -4033,23 +4014,18 @@ async fn finish_review(
         }
         let raw = arguments_raw(&call.call.arguments);
         let family = tool_family(&call.call.name, &raw);
-        let signature = tool_signature(&call.call.name, &raw);
-        let fingerprint = fingerprint(&call.call.name, &raw, &tool_result.content);
-        let read_only = reads_only(core, &call.call.name, &raw);
-        progress.record_tool_result(
+        let event = progress.record_tool_result(
             &ctx.cwd,
             ToolOutcome {
-                fingerprint: &fingerprint,
                 family: &family,
-                signature: &signature,
+                arguments: &raw,
                 result: &tool_result.content,
                 is_error: tool_result.is_error,
                 changed_file: changed,
                 verified_ok: false,
-                read_only,
             },
         );
-        if changed {
+        if matches!(event, ProgressEvent::Changed | ProgressEvent::Verified) {
             loop_guard.record_progress();
         }
         let _ = tx.send(AgentEvent::ToolFinished {
@@ -4280,14 +4256,6 @@ fn preview(text: &str, max: usize) -> String {
         return flat;
     }
     flat.chars().take(max.saturating_sub(1)).collect::<String>() + "…"
-}
-
-fn fingerprint(name: &str, args: &str, content: &str) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    name.hash(&mut hasher);
-    args.hash(&mut hasher);
-    content.hash(&mut hasher);
-    format!("{name}:{:016x}", hasher.finish())
 }
 
 /// Whether a call only inspects: the tool's own read-only declaration, or the

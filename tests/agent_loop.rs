@@ -1363,18 +1363,21 @@ async fn a_stalled_turn_ends_with_a_tool_less_summary() {
     let dir = tempfile::tempdir().unwrap();
     let harness = harness(
         dir.path(),
-        vec![
-            call_script("call_1", "read", json!({"path": "missing-a.txt"})),
-            call_script("call_2", "read", json!({"path": "missing-a.txt"})),
-            call_script("call_3", "read", json!({"path": "missing-a.txt"})),
-            // The first stall pivots: the model is told to change approach.
-            call_script("call_4", "read", json!({"path": "missing-b.txt"})),
-            call_script("call_5", "read", json!({"path": "missing-b.txt"})),
-            call_script("call_6", "read", json!({"path": "missing-b.txt"})),
-            // The second stops the run; the harness then asks for a summary
-            // in a tool-less request.
-            text_script("I read a missing file three times; nothing changed."),
-        ],
+        // One new error, then eight that only echo another path: the first
+        // stall pivots, eight more stop the run, and the harness asks for a
+        // summary in a tool-less request.
+        (0..17)
+            .map(|index| {
+                call_script(
+                    &format!("call_{index}"),
+                    "read",
+                    json!({"path": format!("missing-{index}.txt")}),
+                )
+            })
+            .chain(std::iter::once(text_script(
+                "I read a missing file three times; nothing changed.",
+            )))
+            .collect(),
         &["read"],
     );
     let (outcome, _) = run(&harness, "look").await;
@@ -1875,6 +1878,10 @@ async fn loop_guard_blocks_the_fourth_identical_call() {
             tool_script("bash", json!({"command":"sed -n 1p a.rs"})),
             tool_script("bash", json!({"command":"sed -n 1p a.rs"})),
             tool_script("bash", json!({"command":"sed -n 1p a.rs"})),
+            // Blocked: the loop guard spends the idle budget and the run
+            // pivots once.
+            tool_script("bash", json!({"command":"sed -n 1p a.rs"})),
+            // The same call after the pivot ends the turn.
             tool_script("bash", json!({"command":"sed -n 1p a.rs"})),
             text_script("the loop guard stopped me; nothing changed."),
         ],
@@ -1886,7 +1893,7 @@ async fn loop_guard_blocks_the_fourth_identical_call() {
     assert_eq!(outcome.status, TurnStatus::Stalled);
     assert!(events.iter().any(|event| matches!(
         event,
-        AgentEvent::Guard { code, .. } if code == "loop_guard"
+        AgentEvent::Guard { code, message } if code == "stalled" && message.contains("in a row")
     )));
     let session = harness.session.lock().unwrap();
     let results: Vec<_> = session
@@ -1897,13 +1904,18 @@ async fn loop_guard_blocks_the_fourth_identical_call() {
             _ => None,
         })
         .collect();
-    assert_eq!(results.len(), 4);
+    assert_eq!(results.len(), 5);
     assert!(results[3].contains("loop_guard"), "{results:?}");
+    assert!(results[4].contains("loop_guard"), "{results:?}");
     assert_eq!(
         harness.provider.requests.lock().unwrap().len(),
-        5,
-        "four tool calls, then the tool-less summary request"
+        6,
+        "four calls, a pivot, one more, then the tool-less summary request"
     );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::Notice(message) if message.contains("asked the model to change approach")
+    )));
 }
 
 #[tokio::test]
@@ -1928,8 +1940,8 @@ async fn near_identical_failing_calls_end_the_turn_as_stalled() {
     assert_eq!(outcome.status, TurnStatus::Stalled);
     assert_eq!(
         harness.provider.requests.lock().unwrap().len(),
-        17,
-        "eight failing calls, a pivot, eight more, then the tool-less summary request"
+        18,
+        "one new error and eight that only echo another path, a pivot, eight more, then the tool-less summary request"
     );
     assert!(events.iter().any(|event| matches!(
         event,
@@ -1949,7 +1961,7 @@ async fn near_identical_failing_calls_end_the_turn_as_stalled() {
             _ => None,
         })
         .collect();
-    assert_eq!(results.len(), 16, "later calls must not run");
+    assert_eq!(results.len(), 17, "later calls must not run");
     assert!(
         results.iter().all(|result| result.contains("[exit")),
         "{results:?}"
@@ -2041,13 +2053,13 @@ async fn repeated_successful_calls_between_probes_end_the_turn_as_stalled() {
     );
     assert_eq!(
         harness.provider.requests.lock().unwrap().len(),
-        33,
-        "eight repeats interleaved with eight probes, a pivot, the same again, then the summary"
+        35,
+        "half of each window is the repeat: a stall, a pivot, the same again, then the summary"
     );
     assert!(events.iter().any(|event| matches!(
         event,
         AgentEvent::Guard { code, message }
-            if code == "stalled" && message.contains("same call was repeated")
+            if code == "stalled" && message.contains("of them bash sed")
     )));
 }
 
@@ -2078,7 +2090,7 @@ async fn a_scratch_write_does_not_reset_the_family_count() {
         json!({"path": scratch.display().to_string(), "content": "scratch\n"}),
     ));
     // The second half runs after the pivot the first stall triggers.
-    scripts.extend((4..16).map(|index| {
+    scripts.extend((4..24).map(|index| {
         call_script(
             &format!("probe_{index}"),
             "bash",
@@ -2092,12 +2104,12 @@ async fn a_scratch_write_does_not_reset_the_family_count() {
     assert_eq!(
         outcome.status,
         TurnStatus::Stalled,
-        "eight failing probes in one family stop the turn"
+        "a scratch write does not clear the idle window"
     );
     assert_eq!(
         harness.provider.requests.lock().unwrap().len(),
-        18,
-        "the scratch write is the fifth call, so the eighth failing probe is the ninth; a pivot, eight more probes, then the summary"
+        19,
+        "one new error, three idle probes, the scratch write (not a change), five more idle probes: a pivot, eight more probes, then the summary"
     );
 }
 
@@ -2181,7 +2193,9 @@ async fn polling_a_background_job_does_not_stop_the_turn() {
     let mut scripts = vec![call_script(
         "start",
         "bg",
-        json!({"action": "start", "command": "while true; do echo $RANDOM$RANDOM; sleep 0.001; done"}),
+        // No sleep: the job writes faster than the scripted model polls, so
+        // every poll sees new lines. A poll with static output is idle.
+        json!({"action": "start", "command": "while true; do echo $RANDOM$RANDOM; done"}),
     )];
     // Let the shell start and write before the first poll: a real turn polls a
     // job that has been running, not one that has not spawned yet.
