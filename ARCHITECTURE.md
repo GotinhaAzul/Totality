@@ -362,7 +362,7 @@ observable.
 | Loop guard | Signature is tool name plus canonical arguments. Four identical calls in a row, or an exact 2-8 call cycle repeated four times, blocks the call and the rest of its batch, and spends the ledger's whole idle budget with the guard's reason: the run pivots, and a second trip ends it as `stalled`. A file change or a passing verification clears the history. A read-only call (a read-only tool, a reading action such as `bg logs`, `todo list`, `pr checks`, `git commit_message` or `git branch op = "list"`, or a bash command that only reads) is recorded in the history but never trips it: the same poll can carry new output every time, and a read with the same output is idle in the ledger. |
 | Interactive command guard | Blocks `vim`, `less`, `top`, `htop`, `watch`, `nano`, `ssh` without a command, and similar TTY-only invocations. |
 | Budget checkpoint | Tool calls, model calls, and wall clock are checked at 120 calls, 40 model calls, and 30 minutes. The wall clock is measured, not fixed: the allowance is at least six model calls at the slowest of the last five measured calls, so a slow engine or a long thinking model is never stopped for being slow. Checkpoints do no progress analysis of their own: one renews when the ledger saw a change, a passing verify, or a new result since the last one (a new error alone does not). The first checkpoint with no progress in a turn skips the pending batch, tells the model to drop the repeating approach (write a script, use another tool), and grants one more allowance; the second ends the turn with a tool-less summary and reports why. |
-| Todo gate | After changes to three distinct files, an edit requires a plan; repeated edits to one file are one change. Settlement never reopens a finished turn for a plan. The final task requires a fresh passing verify when verification is configured. |
+| Todo gate | At the third distinct changed file with no plan, `[gates] todo_plan` decides: `derive` (default) records a `todo-state` with `source: "harness"` from session facts (`change <file>` per changed file in session order, completed; `change <target>` in progress; `verify` pending when verification is configured) and lets the edit run, with one result line saying so; the derived plan follows the run to each new file, is recorded once more when the turn settles (every change completed, `verify` completed only after a fresh passing verify), and a model plan replaces it for good. `require` refuses the edit with `TODO_PLAN` until the model calls `todo plan`. `off` disables it. Repeated edits to one file are one change. Settlement never reopens a finished turn for a plan. The final task requires a fresh passing verify when verification is configured. |
 | Verify gate | Successful mutations newer than the last passing verify are unverified. Continue up to two times with a verify instruction, then record the unverified state and allow settle. |
 | Review nudge | One continuation per run after mutations, asking for `review`. Never fights verify or todo gates. |
 
@@ -422,10 +422,11 @@ A failing verify attaches the first three project `file:line` locations its
 output names, three lines on each side, and records them as read, so the next
 call can be the fix instead of a `read`.
 
-One step before the todo gate — the second mutation, or the first edit of a
-second file, with no plan — the successful mutation's tool result ends with one
-line saying the next edit needs a plan. It appears once per turn; the gate
-itself is unchanged.
+In `require` mode, one step before the todo gate — the second mutation, or the
+first edit of a second file, with no plan — the successful mutation's tool
+result ends with one line saying the next edit needs a plan. It appears once
+per turn; the gate itself is unchanged. `derive` mode needs no warning: the
+edit never fails.
 
 ### 3.7 Output recovery
 
@@ -930,8 +931,10 @@ form. `tot doctor` prints both sizes.
   blocked.
 - `bg` starts a process in its own group, captures output to an artifact, and
   exposes `status`, `logs`, and `stop`. At most four live processes per session.
-- `todo` uses an adaptive gate: free for a run that touches one or two files,
-  then a plan is required from the third distinct file. Settlement never asks
+- `todo` uses an adaptive gate: free for a run that touches one or two files;
+  from the third distinct file the harness derives the plan from changed files
+  (or, with `[gates] todo_plan = "require"`, refuses the edit until the model
+  writes one). Settlement never asks
   for a plan as the last action. `plan` auto-starts task 1. `done` accepts a note or harness-
   derived evidence. The final task requires a fresh passing `verify` when
   verification is configured.
@@ -1123,10 +1126,14 @@ form. `tot doctor` prints both sizes.
 
 ### 6.2b Hunk review
 
-`review = "always" | "multi_file" | "off"` (default `multi_file`) decides
+`review = "auto" | "always" | "multi_file" | "off"` (default `auto`) decides
 whether file mutations wait for the user. The agent loop decides per assistant
-batch: `always` activates on a batch with any mutation, `multi_file` when the
-turn's files (already changed plus this batch) reach two, `off` never.
+batch: `auto` activates when a mutated path is a lockfile, a config or
+credential file, or a CI workflow, or when the new text matches a secret
+pattern, and otherwise when the turn's files (already changed plus this batch)
+reach two; `always` activates on a batch with any mutation; `multi_file`
+activates only at two files; `off` never. `always` and `off` are overrides,
+checked before the risk rule.
 
 With an interactive frontend installed (`Core::reviewer`), active batches run
 `edit`, `patch`, and `write` inside a capture scope. The tools compute their
@@ -1153,8 +1160,10 @@ At the batch's last mutation the loop:
 5. Appends the tool results (partial applications name the rejected file and
    line ranges; a fully rejected call returns `HUNK_REJECTED`), the `fs-change`
    entries with the final hash, and a `hunk-review` custom entry recording the
-   mode, hunk/applied/rejected counts, files, and rejected ranges. Undo uses
-   the same snapshot the tool captured before the review, so it still works.
+   mode, the triggering rule (`risk:lockfile`, `risk:config`,
+   `risk:ci_workflow`, `risk:secret`, `multi_file`, or `always`),
+   hunk/applied/rejected counts, files, and rejected ranges. Undo uses the same
+   snapshot the tool captured before the review, so it still works.
 
 Without a reviewer (`--print`, ACP, workflows), no capture is installed: the
 turn writes immediately, exactly as before the feature, and no review entry is
