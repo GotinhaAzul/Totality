@@ -2042,7 +2042,7 @@ async fn repeating_a_capped_read_stalls() {
     assert!(
         results.iter().any(|result| result.contains("out-")),
         "the read must be capped into an artifact: {:?}",
-        &results[0]
+        results[0]
     );
     assert_eq!(outcome.status, TurnStatus::Stalled);
     assert_eq!(
