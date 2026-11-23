@@ -1309,23 +1309,29 @@ const DERIVED_MODEL_PROFILE: &str = "probe-strict";
 /// model's sampler profile (a user profile or a built-in preset) is kept:
 /// the derived profile copies it and adds only the strict fields. Returns
 /// the notice to show, or `None` when nothing changed.
+/// Whether the user chose the tool surface: a profile (`--profile`,
+/// `TOT_PROFILE`, `default_profile`), a model profile (`--model-profile`,
+/// `TOT_MODEL_PROFILE`), or a model profile of theirs whose `match` covers the
+/// model. Built-in sampler presets are not a choice of surface.
+pub(crate) fn surface_pinned(config: &Config) -> bool {
+    let (resolved, _) = config.model_profile();
+    let user_model_profile =
+        resolved != "default" && !Config::SAMPLER_PRESETS.contains(&resolved.as_str());
+    !config.profile_name.is_empty()
+        || !config.default_profile.is_empty()
+        || config.model_profile_override.is_some()
+        || user_model_profile
+}
+
 pub(crate) fn derive_surface(config: &mut Config, probe: &probe::ToolProbe) -> Option<String> {
     use probe::ToolProbeOutcome as Outcome;
     if probe.native() || config.derived_surface.is_some() {
         return None;
     }
-    let (resolved, base) = config.model_profile();
-    let user_model_profile =
-        resolved != "default" && !Config::SAMPLER_PRESETS.contains(&resolved.as_str());
-    if !config.profile_name.is_empty()
-        || !config.default_profile.is_empty()
-        || config.model_profile_override.is_some()
-        || user_model_profile
-        || !config.profiles.contains_key(DERIVED_PROFILE)
-    {
+    if surface_pinned(config) || !config.profiles.contains_key(DERIVED_PROFILE) {
         return None;
     }
-    let mut derived = base;
+    let mut derived = config.model_profile().1;
     derived.tool_mode = crate::config::ToolMode::Repair;
     derived.short_tool_schemas = Some(crate::config::ToolSchemas::Short);
     derived.parallel_tool_calls = Some(false);
