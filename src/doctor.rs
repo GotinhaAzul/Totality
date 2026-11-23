@@ -37,6 +37,11 @@ pub struct DoctorManifest {
     /// result. `tot doctor` itself never sends a chat completion.
     #[serde(default)]
     pub tool_probe: Option<ToolProbe>,
+    /// The tool surface a session would start with and why: `pinned`
+    /// (`--profile`, `TOT_PROFILE`, `default_profile`, a model profile),
+    /// `default`, or `tool probe <outcome>` when the probe evidence chose it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
     pub reasoning_field: Option<String>,
     /// `json_schema`, `grammar`, `none`, or `unknown`.
     pub structured_output: String,
@@ -446,6 +451,7 @@ impl DoctorManifest {
             tool_dialect,
             tool_parser,
             tool_probe: None,
+            surface: None,
             reasoning_field,
             structured_output,
             cache_mode,
@@ -575,6 +581,9 @@ impl DoctorManifest {
                 probe.checked
             )),
             None => out.push_str("tool probe: not run (no cached conformance result)\n"),
+        }
+        if let Some(surface) = &self.surface {
+            out.push_str(&format!("surface: {surface}\n"));
         }
         out.push_str(&format!(
             "reasoning field: {}\n",
@@ -873,6 +882,7 @@ mod tests {
             tool_dialect: "native".into(),
             tool_parser: None,
             tool_probe: None,
+            surface: None,
             reasoning_field: None,
             structured_output: "unknown".into(),
             cache_mode: None,

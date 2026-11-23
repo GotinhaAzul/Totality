@@ -57,6 +57,10 @@ pub struct Config {
     pub profile_name: String,
     #[serde(skip)]
     pub model_profile_override: Option<String>,
+    /// Set when the harness chose the tool surface from the tool-call probe
+    /// (nothing was pinned): the probe outcome that caused it. Runtime only.
+    #[serde(skip)]
+    pub derived_surface: Option<String>,
     #[serde(skip)]
     pub trust: bool,
     /// OS-level sandbox for `bash` and `bg`; runtime only.
@@ -508,6 +512,11 @@ impl Config {
         self.profiles.get(self.profile_name()).unwrap_or(&FALLBACK)
     }
 
+    /// Sampler presets that `auto` may pick from the model id. They tune
+    /// sampling only, so they are not a user's choice of tool surface.
+    pub const SAMPLER_PRESETS: &'static [&'static str] =
+        &["qwen-coding", "gemma-chat", "glm-agent"];
+
     /// Resolve the model profile for `model`. `auto` matches by prefix declared
     /// in `match`; otherwise `default`.
     pub fn model_profile(&self) -> (String, ModelProfile) {
@@ -531,7 +540,7 @@ impl Config {
         // A user profile always beats a built-in sampler preset, even when
         // both match the same prefix. Presets still apply when the user has
         // not configured a matching profile.
-        const PRESETS: &[&str] = &["qwen-coding", "gemma-chat", "glm-agent"];
+        const PRESETS: &[&str] = Config::SAMPLER_PRESETS;
         for skip_presets in [true, false] {
             for (name, profile) in &self.model_profiles {
                 if name == "default" || (skip_presets && PRESETS.contains(&name.as_str())) {

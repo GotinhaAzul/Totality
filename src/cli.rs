@@ -939,6 +939,23 @@ async fn run_doctor(config: &Config, paths: &Paths, json: bool, fix: bool) -> Re
         manifest.tool_dialect = cached.mode.clone();
         manifest.tool_probe = Some(cached);
     }
+    let mut surface_config = config.clone();
+    manifest.surface =
+        Some(
+            match manifest.tool_probe.as_ref().and_then(|probe| {
+                crate::app::derive_surface(&mut surface_config, probe).map(|_| probe)
+            }) {
+                Some(probe) => format!(
+                    "{} · tool probe {}",
+                    surface_config.profile_name(),
+                    probe.outcome.code()
+                ),
+                None if config.profile_name.is_empty() && config.default_profile.is_empty() => {
+                    format!("{} · default", config.profile_name())
+                }
+                None => format!("{} · pinned", config.profile_name()),
+            },
+        );
     manifest.verify = Some(crate::doctor::VerifyStatus {
         configured: if config.verify.is_detected() {
             0

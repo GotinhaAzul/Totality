@@ -9,6 +9,15 @@ release may change defaults when the change is called out below.
 
 ### Added
 
+- A failed tool-call conformance probe picks the weak-model surface when
+  nothing is pinned ([#144](https://github.com/GotinhaAzul/Totality/issues/144)):
+  `rejected_400`/`empty_call` start the session on `strict` (six tools, short
+  schemas, `one_call`, repair), `tools_dropped`/`prose_fallback` on the same
+  tools without `one_call`. The model's sampler preset is kept, a notice and a
+  `profile-change` entry name the evidence, and `tot doctor` prints a
+  `surface:` line. Any `--profile`, `default_profile`, `--model-profile`, or
+  matching user model profile wins.
+
 - `git` action `rewrite_history` removes paths from every branch and tag with
   guardrails in the action itself: clean-tree and repository-root checks, a
   backup bundle under `<data-dir>/rewrites/`, `git filter-repo` (or
