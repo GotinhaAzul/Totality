@@ -224,6 +224,19 @@ fn two_file_edit_scripts() -> Vec<Script> {
     ]
 }
 
+/// Read one file and then propose an edit to it.
+fn single_edit_scripts(path: &str, old: &str, new: &str) -> Vec<Script> {
+    vec![
+        call_script("read_one", "read", json!({"path": path})),
+        call_script(
+            "edit_one",
+            "edit",
+            json!({"path": path, "old": old, "new": new}),
+        ),
+        text_script("done"),
+    ]
+}
+
 fn file_contents(path: &std::path::Path) -> (String, String) {
     (
         std::fs::read_to_string(path.join("a.txt")).unwrap(),
@@ -3726,6 +3739,253 @@ async fn review_always_buffers_even_a_single_file_edit() {
         "always reviews the first mutation too"
     );
     assert_eq!(reviewer.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn auto_reviews_a_risky_single_file_edit_and_records_the_rule() {
+    use totality::tools::hunk::HunkDecision;
+
+    for (path, rule) in [
+        (".env", "config"),
+        ("Cargo.lock", "lockfile"),
+        (".github/workflows/ci.yml", "ci_workflow"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(path);
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&file, "one\n").unwrap();
+
+        let reviewer = scripted_reviewer(vec![HunkDecision::reject_all(1)]);
+        let mut config = base_config();
+        assert_eq!(
+            config.review,
+            totality::config::ReviewMode::Auto,
+            "auto is the default"
+        );
+        config.profiles.get_mut("test").expect("test profile").tools =
+            ["read", "edit"].map(str::to_string).to_vec();
+        let harness = harness_config(dir.path(), single_edit_scripts(path, "one", "two"), config);
+        harness.core.set_reviewer(reviewer.clone());
+
+        let (outcome, _) = run(&harness, "edit the risky file").await;
+        assert_eq!(
+            outcome.status,
+            TurnStatus::Done,
+            "{path}: {:?}",
+            outcome.error
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "one\n",
+            "{path}: the rejected hunk must not land"
+        );
+        assert_eq!(
+            reviewer.requests.lock().unwrap().len(),
+            1,
+            "{path}: a risky single-file edit is reviewed"
+        );
+
+        let session = harness.session.lock().unwrap();
+        let review = session
+            .latest_custom_on_path("hunk-review")
+            .unwrap_or_else(|| panic!("{path}: no hunk-review entry"));
+        match &review.kind {
+            EntryKind::Custom(custom) => {
+                assert_eq!(custom.payload["mode"], "auto", "{path}");
+                let expected = format!("risk:{rule}");
+                assert_eq!(
+                    custom.payload["trigger"].as_str(),
+                    Some(expected.as_str()),
+                    "{path}: the entry names the rule"
+                );
+            }
+            _ => panic!("{path}: wrong entry type"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn auto_scans_a_secret_passed_through_an_argument_alias() {
+    use totality::tools::hunk::HunkDecision;
+
+    let dir = tempfile::tempdir().unwrap();
+    let reviewer = scripted_reviewer(vec![HunkDecision::reject_all(1)]);
+    let harness = harness(
+        dir.path(),
+        vec![
+            // `text` is an accepted alias that repair maps onto `content`.
+            call_script(
+                "write_secret",
+                "write",
+                json!({"path": "src/keys.rs", "text": "const KEY: &str = \"AKIA1234567890ABCDEF\";\n"}),
+            ),
+            text_script("ok"),
+        ],
+        &["write"],
+    );
+    harness.core.set_reviewer(reviewer.clone());
+
+    let (outcome, _) = run(&harness, "add the key").await;
+    assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
+    assert_eq!(
+        reviewer.requests.lock().unwrap().len(),
+        1,
+        "the secret opens review"
+    );
+    assert!(
+        !dir.path().join("src/keys.rs").exists(),
+        "the rejected write never lands"
+    );
+    let session = harness.session.lock().unwrap();
+    let review = session
+        .latest_custom_on_path("hunk-review")
+        .expect("review entry");
+    match &review.kind {
+        EntryKind::Custom(custom) => assert_eq!(custom.payload["trigger"], "risk:secret"),
+        _ => panic!("wrong entry type"),
+    }
+}
+
+#[tokio::test]
+async fn auto_lands_a_safe_single_file_edit_without_review() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "one\n").unwrap();
+    let reviewer = scripted_reviewer(Vec::new());
+    let harness = harness(
+        dir.path(),
+        single_edit_scripts("src/lib.rs", "one", "two"),
+        &["read", "edit"],
+    );
+    harness.core.set_reviewer(reviewer.clone());
+
+    let (outcome, _) = run(&harness, "edit source").await;
+    assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
+        "two\n",
+        "a safe single-file edit still lands immediately"
+    );
+    assert!(
+        reviewer.requests.lock().unwrap().is_empty(),
+        "no review for a safe single file"
+    );
+    assert!(
+        harness
+            .session
+            .lock()
+            .unwrap()
+            .latest_custom_on_path("hunk-review")
+            .is_none(),
+        "no review happened, so no decision is recorded"
+    );
+}
+
+#[tokio::test]
+async fn always_and_off_override_the_auto_risk_rule() {
+    use totality::tools::hunk::HunkDecision;
+
+    // `always` reviews a safe source edit the auto rule would land.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "one\n").unwrap();
+    let reviewer = scripted_reviewer(vec![HunkDecision::reject_all(1)]);
+    let mut config = base_config();
+    config.review = totality::config::ReviewMode::Always;
+    config.profiles.get_mut("test").expect("test profile").tools =
+        ["read", "edit"].map(str::to_string).to_vec();
+    let harness = harness_config(
+        dir.path(),
+        single_edit_scripts("src/lib.rs", "one", "two"),
+        config,
+    );
+    harness.core.set_reviewer(reviewer.clone());
+    let (outcome, _) = run(&harness, "edit safely").await;
+    assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
+        "one\n",
+        "always reviews even a safe file"
+    );
+    assert_eq!(reviewer.requests.lock().unwrap().len(), 1);
+    {
+        let session = harness.session.lock().unwrap();
+        let review = session
+            .latest_custom_on_path("hunk-review")
+            .expect("hunk-review entry");
+        match &review.kind {
+            EntryKind::Custom(custom) => {
+                assert_eq!(custom.payload["mode"], "always");
+                assert_eq!(custom.payload["trigger"], "always");
+            }
+            _ => panic!("wrong entry type"),
+        }
+    }
+
+    // `off` lands a risky config edit the auto rule would review.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".env"), "one\n").unwrap();
+    let reviewer = scripted_reviewer(Vec::new());
+    let mut config = base_config();
+    config.review = totality::config::ReviewMode::Off;
+    config.profiles.get_mut("test").expect("test profile").tools =
+        ["read", "edit"].map(str::to_string).to_vec();
+    let harness = harness_config(
+        dir.path(),
+        single_edit_scripts(".env", "one", "two"),
+        config,
+    );
+    harness.core.set_reviewer(reviewer.clone());
+    let (outcome, _) = run(&harness, "edit .env").await;
+    assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".env")).unwrap(),
+        "two\n",
+        "off writes immediately, even to a risky path"
+    );
+    assert!(
+        reviewer.requests.lock().unwrap().is_empty(),
+        "no review requests in off mode"
+    );
+    assert!(
+        harness
+            .session
+            .lock()
+            .unwrap()
+            .latest_custom_on_path("hunk-review")
+            .is_none(),
+        "off records no review entry"
+    );
+}
+
+#[tokio::test]
+async fn headless_auto_accepts_a_risky_single_file_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".env"), "one\n").unwrap();
+    let harness = harness(
+        dir.path(),
+        single_edit_scripts(".env", "one", "two"),
+        &["read", "edit"],
+    );
+
+    let (outcome, _) = run(&harness, "edit .env without a reviewer").await;
+    assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".env")).unwrap(),
+        "two\n",
+        "without a reviewer the risky edit auto-accepts"
+    );
+    assert!(
+        harness
+            .session
+            .lock()
+            .unwrap()
+            .latest_custom_on_path("hunk-review")
+            .is_none(),
+        "no reviewer means no review entry"
+    );
 }
 
 // ---------------------------------------------------------------------------
