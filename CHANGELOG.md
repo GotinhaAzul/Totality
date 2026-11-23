@@ -29,6 +29,12 @@ release may change defaults when the change is called out below.
   an ordinary permission subject (`git rewrite_history -- <paths>`): the TUI
   asks; headless runs deny it unless an allow rule or `--yolo` opts in.
 - `tot doctor` prints the policy state of `git rewrite_history`.
+- The repetition guard now also stops reasoning loops that are not exact
+  (`Good. Good.\nGood! good.`, a few sentences cycling in random order, or a
+  loop longer than 400 bytes). Once the last 600 words of chain-of-thought
+  fall below 20% distinct word trigrams, the stream stops and the loop is
+  nudged and ended like an exact one. Visible content keeps the exact-only
+  check ([#183](https://github.com/GotinhaAzul/Totality/issues/183)).
 
 ### Changed
 

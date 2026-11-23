@@ -977,6 +977,51 @@ async fn repetition_loops_are_cut_and_nudged() {
 }
 
 #[tokio::test]
+async fn noisy_reasoning_loops_are_cut_and_nudged() {
+    // "Good." with sampling noise in the separators never repeats byte for
+    // byte, so only the near-loop check on reasoning can stop it.
+    let dir = tempfile::tempdir().unwrap();
+    let separators = [" ", "\n", "  ", "\n\n", " ", " "];
+    let mut seed = 7u64;
+    let mut events: Vec<StreamEvent> = (0..3000)
+        .map(|_| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            StreamEvent::ReasoningDelta(format!("Good.{}", separators[(seed >> 33) as usize % 6]))
+        })
+        .collect();
+    events.push(StreamEvent::Finish("length".into()));
+    let harness = harness(
+        dir.path(),
+        vec![Script::Events(events), text_script("Done.")],
+        &["read"],
+    );
+    let (outcome, events) = run(&harness, "go").await;
+    assert_eq!(outcome.status, TurnStatus::Done);
+    let first = &assistants(&harness.session)[0];
+    assert_eq!(first.stop_reason.as_deref(), Some("repetition"));
+    assert!(
+        first.reasoning.as_deref().unwrap_or_default().len() < 2000,
+        "the looping window is not persisted"
+    );
+    assert!(
+        user_messages(&harness.session)
+            .iter()
+            .any(|m| m.contains("repetition guard"))
+    );
+    let streamed = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::ReasoningDelta(_)))
+        .count();
+    assert!(
+        streamed < 1000,
+        "generation stopped early: {streamed} deltas"
+    );
+    assert_eq!(last_assistant(&harness.session), "Done.");
+}
+
+#[tokio::test]
 async fn structured_output_repairs_invalid_json_or_blocks_the_turn() {
     let schema = json!({
         "type": "object",
