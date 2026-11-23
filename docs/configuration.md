@@ -746,7 +746,9 @@ third distinct file. `derive` (default) records the plan itself from session
 facts and lets the edit run: `change <file>` for each file already changed
 (completed), `change <target>` (in progress), and `verify` (pending) when
 verification is configured. The entry is a normal `todo-state` with
-`source: "harness"`; it follows the run to each new file, and a model
+`source: "harness"`; it follows the run to each new file, is settled when
+the turn ends (changes completed, `verify` completed only after a fresh
+passing verify), and a model
 `todo action="plan"` replaces it for good. `require` keeps the older
 behavior: the edit is refused with `TODO_PLAN` until the model writes a plan.
 `off` removes the gate.

@@ -2897,7 +2897,11 @@ async fn the_third_file_gets_a_derived_plan_instead_of_a_block() {
         "{results:?}"
     );
     let states = todo_states(&harness.session);
-    assert_eq!(states.len(), 1, "{states:?}");
+    assert_eq!(
+        states.len(),
+        2,
+        "derived at c, settled at the end: {states:?}"
+    );
     assert_eq!(states[0]["source"], "harness");
     assert_eq!(
         task_pairs(&states[0]),
@@ -2906,6 +2910,13 @@ async fn the_third_file_gets_a_derived_plan_instead_of_a_block() {
             ("change b.txt".into(), "completed".into()),
             ("change c.txt".into(), "in_progress".into()),
         ]
+    );
+    assert_eq!(states[1]["source"], "harness");
+    assert!(
+        task_pairs(&states[1])
+            .iter()
+            .all(|task| task.1 == "completed"),
+        "a settled turn leaves no stale in-progress step: {states:?}"
     );
 }
 
@@ -2936,7 +2947,16 @@ async fn a_derived_plan_follows_the_run_and_ends_with_verify_when_configured() {
     let (outcome, _) = run(&harness, "make four files").await;
     assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
     let states = todo_states(&harness.session);
-    assert_eq!(states.len(), 2, "derive at c, extend at d: {states:?}");
+    assert_eq!(
+        states.len(),
+        3,
+        "derive at c, extend at d, settle: {states:?}"
+    );
+    assert_eq!(
+        task_pairs(&states[2]).last().unwrap(),
+        &("verify".to_string(), "completed".to_string()),
+        "the verify task completes only after a fresh passing verify"
+    );
     assert_eq!(
         task_pairs(&states[1]),
         vec![
@@ -3031,7 +3051,6 @@ async fn a_derived_plan_lists_one_batch_in_call_order() {
     let (outcome, _) = run(&harness, "make files").await;
     assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
     let states = todo_states(&harness.session);
-    assert_eq!(states.len(), 1, "{states:?}");
     let names: Vec<String> = task_pairs(&states[0]).into_iter().map(|t| t.0).collect();
     assert_eq!(names, vec!["change z.txt", "change m.txt", "change a.txt"]);
 }

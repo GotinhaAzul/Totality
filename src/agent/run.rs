@@ -1334,6 +1334,27 @@ async fn run_loop(
             }
             match gates::settle(&facts, &mut progress, gate_tools) {
                 SettleDecision::Done => {
+                    if facts.todo_plan_derived {
+                        let settled = gates::settled_derived_plan(
+                            &facts,
+                            gate_tools.verify && verify_configured,
+                        );
+                        let mut session = core.session.lock().expect("session lock");
+                        let current =
+                            session
+                                .latest_custom_on_path("todo-state")
+                                .and_then(|entry| match &entry.kind {
+                                    EntryKind::Custom(custom) => {
+                                        custom.payload.get("tasks").cloned()
+                                    }
+                                    _ => None,
+                                });
+                        if current.as_ref() != settled.payload.get("tasks")
+                            && let Err(error) = session.append(EntryKind::Custom(settled))
+                        {
+                            tracing::warn!(%error, "cannot record the settled plan");
+                        }
+                    }
                     if gate_tools.verify
                         && verify_configured
                         && facts.unverified_mutations

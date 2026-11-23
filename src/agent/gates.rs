@@ -434,6 +434,24 @@ pub fn derived_plan(
         .with("source", DERIVED_PLAN_SOURCE)
 }
 
+/// The derived plan as the turn settles: every `change <file>` completed,
+/// and `verify` completed only when a project verify passed after the last
+/// change. Recorded at settle so the plan panel and compaction's `open:` list
+/// show what happened, not the last in-progress step.
+pub fn settled_derived_plan(facts: &TurnFacts, verify: bool) -> crate::session::CustomData {
+    let mut plan = derived_plan(&facts.files, None, false);
+    if verify {
+        let passed = facts.last_verify_passed == Some(true) && !facts.unverified_mutations;
+        if let Some(tasks) = plan.payload.get_mut("tasks").and_then(|v| v.as_array_mut()) {
+            tasks.push(serde_json::json!({
+                "content": "verify",
+                "status": if passed { "completed" } else { "pending" },
+            }));
+        }
+    }
+    plan
+}
+
 /// One line for the result of a mutation that leaves the run one step from
 /// [`todo_edit_gate`]: `files` counts this mutation. `None` when a plan exists
 /// or the gate is still more than one step away.
@@ -483,6 +501,34 @@ mod tests {
             derived_plan(&files, Some("c.rs"), true).payload,
             plan.payload
         );
+    }
+
+    #[test]
+    fn a_settled_derived_plan_completes_changes_and_verify_only_when_fresh() {
+        let mut facts = TurnFacts {
+            files: vec!["a.rs".into(), "b.rs".into()],
+            unverified_mutations: true,
+            ..TurnFacts::default()
+        };
+        let status = |plan: &crate::session::CustomData| -> Vec<String> {
+            plan.payload["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["status"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            status(&settled_derived_plan(&facts, true)),
+            vec!["completed", "completed", "pending"]
+        );
+        facts.unverified_mutations = false;
+        facts.last_verify_passed = Some(true);
+        assert_eq!(
+            status(&settled_derived_plan(&facts, true)),
+            vec!["completed", "completed", "completed"]
+        );
+        assert_eq!(status(&settled_derived_plan(&facts, false)).len(), 2);
     }
 
     #[test]
