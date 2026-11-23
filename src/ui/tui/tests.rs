@@ -1283,7 +1283,16 @@ async fn permissions_command_sets_levels_and_yolo_needs_a_key() {
     app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
         .await;
     assert_eq!(mode(&app), PermissionMode::Yolo);
-    assert!(app.footer().status.contains("yolo: no approvals"));
+    assert!(app.footer().status.contains("yolo: no restrictions"));
+
+    // skip-ask needs the same one-key confirmation.
+    app.run_command("/permissions skip-ask").await;
+    assert_eq!(mode(&app), PermissionMode::Yolo);
+    assert!(app.footer().hints.contains("y confirm"));
+    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+        .await;
+    assert_eq!(mode(&app), PermissionMode::SkipAsk);
+    assert!(app.footer().status.contains("skip-ask: no approvals"));
     // Session-only: the config (and so the config file) keeps the default.
     assert_eq!(
         app.core().unwrap().config.permissions.mode,
@@ -1319,7 +1328,7 @@ async fn permissions_command_leaves_plan_and_restores_the_tools() {
 }
 
 #[tokio::test]
-async fn permissions_command_opens_a_picker_with_the_four_levels() {
+async fn permissions_command_opens_a_picker_with_the_five_levels() {
     let (_dir, mut app) = test_app().await;
     app.run_command("/permissions").await;
     let Some(ModalData::Picker(picker)) = &app.modal else {
@@ -1332,9 +1341,13 @@ async fn permissions_command_opens_a_picker_with_the_four_levels() {
         .iter()
         .map(|item| item.label.as_str())
         .collect();
-    assert_eq!(labels, vec!["normal", "accept-edits", "deny-all", "yolo"]);
+    assert_eq!(
+        labels,
+        vec!["normal", "accept-edits", "deny-all", "skip-ask", "yolo"]
+    );
     assert!(picker.items.iter().all(|item| !item.description.is_empty()));
     assert!(picker.items[3].description.contains("deny rules"));
+    assert!(picker.items[4].description.contains("no restrictions"));
 }
 
 #[tokio::test]

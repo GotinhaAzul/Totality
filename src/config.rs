@@ -488,9 +488,10 @@ impl Config {
                 .with_context(|| format!("invalid [mcp.{name}]"))?;
         }
         self.hooks.validate()?;
-        if self.permissions.mode == crate::policy::PermissionMode::Yolo {
+        if self.permissions.mode.explicit_only() {
+            let label = self.permissions.mode.label();
             bail!(
-                "permissions.mode = \"yolo\" is not accepted in a config file; pass --yolo explicitly for one run"
+                "permissions.mode = \"{label}\" is not accepted in a config file; pass --{label} explicitly for one run"
             );
         }
         crate::policy::Policy::compile(&self.permissions.rules).map_err(anyhow::Error::msg)?;

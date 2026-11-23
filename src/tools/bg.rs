@@ -149,7 +149,9 @@ impl BgTool {
         if let Err(message) = gate {
             return ToolResult::err("SEC_SCOPE", message);
         }
-        if let Some(message) = crate::tools::git::destructive_git(&command) {
+        if !ctx.unrestricted
+            && let Some(message) = crate::tools::git::destructive_git(&command)
+        {
             return ToolResult::err("GIT_DESTRUCTIVE", message);
         }
 

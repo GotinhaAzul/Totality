@@ -100,7 +100,7 @@ pub fn history_rewrite_state(
     match policy.decide_explained(permissions.mode, &facts) {
         (Decision::Allow, layer) => format!("allowed ({layer})"),
         (Decision::Ask(_), layer) => format!(
-            "ask ({layer}): the TUI prompts; tot serve and other runs that cannot ask deny it unless an allow rule or --yolo applies"
+            "ask ({layer}): the TUI prompts; tot serve and other runs that cannot ask deny it unless an allow rule, --skip-ask, or --yolo applies"
         ),
         (Decision::Deny { .. }, layer) => format!("deny ({layer})"),
     }

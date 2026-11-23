@@ -161,7 +161,7 @@ pr = "ask"                      # ask: /pr confirm approves drafts and comments
 subject_max = 72                # longest accepted commit subject
 
 [permissions]
-mode = "normal"                 # normal | accept-edits | plan | deny-all (yolo: --yolo only)
+mode = "normal"                 # normal | accept-edits | plan | deny-all (skip-ask, yolo: flags only)
 
 [[permissions.rules]]           # ordered; see "Permissions" below
 id = "no-push"
@@ -498,15 +498,15 @@ mutating actions refuse and change nothing.
 
 `git` action `rewrite_history` (removing files from all history) has no
 `[git]` switch: it is a permission subject, `git rewrite_history -- <paths>`.
-`normal` asks, `deny-all` denies, `--yolo` runs it, and headless runs that
-cannot ask deny it. An operator who wants unattended rewrites adds a rule:
+`normal` asks, `deny-all` denies, `--skip-ask` and `--yolo` run it, and
+headless runs that cannot ask deny it. An operator who wants unattended rewrites adds a rule:
 
 ```toml
 [[permissions.rules]]
 id = "history-rewrite"
 tool = "git"
 command = '^git rewrite_history '
-action = "allow"   # or "deny" to forbid it even under --yolo
+action = "allow"   # or "deny" to forbid it even under --skip-ask
 ```
 
 `tot doctor` prints the state this resolves to.
@@ -529,22 +529,35 @@ bookkeeping (`todo`, `thread`, `finding`) always run.
 | `accept-edits` | run | ask |
 | `plan` | refused (`plan_mode`) | refused unless read-only |
 | `deny-all` (alias `dont-ask`) | denied | denied |
+| `skip-ask` | run | run |
 | `yolo` | run | run |
 
 `ask` and `dont-ask` are the old spellings of `normal` and `deny-all`; they
 still load from a config file and still work on `--mode`, but new files should
 use the new names.
 
-In the TUI, `/permissions` opens a picker over the four levels (`normal`,
-`accept-edits`, `deny-all`, `yolo`) with the current one marked, and
-`/permissions <level>` sets one directly. The change lasts for the session and
-never edits the config file. `yolo` asks for a one-key confirmation, and the
-session records it just like `--yolo`. Plan mode keeps its own command,
-`/plan`.
+In the TUI, `/permissions` opens a picker over the five levels (`normal`,
+`accept-edits`, `deny-all`, `skip-ask`, `yolo`) with the current one marked,
+and `/permissions <level>` sets one directly. The change lasts for the session
+and never edits the config file. `skip-ask` and `yolo` ask for a one-key
+confirmation, and the session records them just like their flags. Plan mode
+keeps its own command, `/plan`.
 
-`yolo` is never the default and cannot be set in a config file; `--yolo` or
-`/permissions yolo` selects it for one session, and the session records it.
-Deny rules still apply in every mode.
+`skip-ask` and `yolo` differ in what still stops a call:
+
+| | `skip-ask` | `yolo` |
+|---|---|---|
+| Approvals | none | none |
+| Deny rules | apply | ignored |
+| Provenance approval (after an injection warning) | applies | off; the warning is still shown and the bypass is recorded |
+| Destructive git guard in `bash`/`bg` (`reset --hard`, `push --force`, `rebase`, `filter-branch`, ...) | applies | off |
+| Sandbox, path jail, engagement scope, `pre_tool` hooks | apply | apply |
+
+The last row has its own switches (`--no-sandbox`, no `--path-jail`,
+`/sec scope`, `[hooks]`); neither mode changes them. Neither mode is ever the
+default or accepted in a config file or on `--mode`; `--skip-ask`, `--yolo`, or
+`/permissions <level>` selects one for one session, and the session records
+it. Deny rules apply in every other mode.
 
 **Rules** are an ordered list. Every field a rule sets must match:
 
@@ -569,7 +582,9 @@ continues. In the TUI an `ask` shows the exact command or path, with a diff for
 file edits; `y` allows, `n` or `Esc` denies. An approval covers exactly that
 command or path for the rest of the session: approving `git push origin main`
 does not approve `git push origin main --force`. Headless runs cannot ask, so
-an `ask` is denied there; use `--mode accept-edits`, allow rules, or `--yolo`.
+an `ask` is denied there; use `--mode accept-edits`, allow rules, `--skip-ask`,
+or `--yolo`. A provenance approval cannot be given there either: the call is
+denied and the model is told to stop and report it; only `--yolo` runs it.
 ACP forwards the question to the editor.
 
 **Repeated approvals become a rule.** The harness counts your approvals of
@@ -803,7 +818,7 @@ with evidence for each step, from the manifest, task runners, and CI
 `--no-redact`, `--no-agents-md`, `--continue`, `--resume`, `--path-jail`,
 `--sandbox [read-only|workspace-write]`, `--no-sandbox`, `--engagement`,
 `--no-color`, `--keep-artifacts`, `--clean-artifacts`, `--allow-remote-images`,
-`--keep-exif`, `--debug`, `--mode <normal|accept-edits|plan|deny-all>`, `--yolo`,
+`--keep-exif`, `--debug`, `--mode <normal|accept-edits|plan|deny-all>`, `--skip-ask`, `--yolo`,
 `--plan`.
 
 `tot doctor [--json] [--fix]` prints the engine capability manifest without

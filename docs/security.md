@@ -38,17 +38,20 @@ harness itself in a container.
 
 A policy engine runs before every tool call (see
 [configuration.md](configuration.md#permissions)). Modes (`normal`,
-`accept-edits`, `plan`, `deny-all`, `yolo`) and ordered allow/ask/deny rules on
-tool, path, command, and network decide whether a call runs, asks the user
-with the exact command or path, or returns `DENIED` with the rule id. A `deny`
-cannot be undone by a later, less specific `allow`, and it applies in every
-mode, including `--yolo`.
+`accept-edits`, `plan`, `deny-all`, `skip-ask`, `yolo`) and ordered
+allow/ask/deny rules on tool, path, command, and network decide whether a call
+runs, asks the user with the exact command or path, or returns `DENIED` with
+the rule id. A `deny` cannot be undone by a later, less specific `allow`, and
+it applies in every mode except `--yolo`, which is unrestricted: no approvals,
+no deny rules, no provenance approval, no destructive git guard. `--skip-ask`
+only removes approvals and keeps the rest. The sandbox, path jail, and
+engagement scope apply in both.
 
 The policy is read only from the global config and a trusted project config.
 Skills and workflows cannot change it: a workflow that lists `bash` still hits a
 `git push` deny, and a workflow that lists `write` cannot bring it back in plan
-mode. `--yolo` is never the default, is not accepted from a config file, and is
-recorded in the session header.
+mode. `--skip-ask` and `--yolo` are never the default, are not accepted from a
+config file, and are recorded in the session header.
 
 Rules are not a sandbox. Command matching sees the command text, so
 `sh -c "$(echo Z2l0IHB1c2g= | base64 -d)"` is not a `git push` to a regex;

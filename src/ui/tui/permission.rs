@@ -134,15 +134,19 @@ impl App {
         true
     }
 
-    /// Keys while a `yolo` switch waits for confirmation: `y` enables it,
-    /// any other key cancels so a stray keystroke cannot remove approvals.
+    /// Keys while a `skip-ask` or `yolo` switch waits for confirmation: `y`
+    /// enables it, any other key cancels so a stray keystroke cannot remove
+    /// approvals.
     pub(super) async fn handle_mode_confirm(&mut self, key: &KeyEvent) -> bool {
         let Some(mode) = self.pending_mode_confirm.take() else {
             return false;
         };
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => self.set_permission_mode(mode).await,
-            _ => self.set_notice("yolo not enabled; permissions unchanged", Role::Muted),
+            _ => self.set_notice(
+                format!("{} not enabled; permissions unchanged", mode.label()),
+                Role::Muted,
+            ),
         }
         true
     }
@@ -161,9 +165,9 @@ impl App {
             };
             return Some((keys.into(), Role::Warning));
         }
-        if self.pending_mode_confirm.is_some() {
+        if let Some(mode) = self.pending_mode_confirm {
             return Some((
-                "yolo: press y to confirm · any key cancels".into(),
+                format!("{}: press y to confirm · any key cancels", mode.label()),
                 Role::Warning,
             ));
         }
@@ -182,7 +186,11 @@ impl App {
                 "deny-all: anything that would ask is denied".into(),
                 Role::Warning,
             )),
-            PermissionMode::Yolo => Some(("yolo: no approvals".into(), Role::Error)),
+            PermissionMode::SkipAsk => Some((
+                "skip-ask: no approvals; deny rules and guards apply".into(),
+                Role::Error,
+            )),
+            PermissionMode::Yolo => Some(("yolo: no restrictions".into(), Role::Error)),
         }
     }
 }

@@ -6,9 +6,10 @@
 //! is built. The engine is the single pre-dispatch decision point
 //! (`authorize::decide()`): config `[permissions]` rules decide first, and an
 //! `ask` that nobody can answer is denied. Modes reuse the engine names
-//! (`normal` default, `accept-edits`, `deny-all`, `yolo`); `yolo` must be
-//! enabled by the operator with `tot serve --allow-yolo`, never by a request
-//! alone.
+//! (`normal` default, `accept-edits`, `deny-all`, `skip-ask`, `yolo`);
+//! `skip-ask` must be enabled by the operator with `tot serve
+//! --allow-skip-ask` (or `--allow-yolo`), and `yolo` with `--allow-yolo`,
+//! never by a request alone.
 
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
@@ -49,7 +50,10 @@ pub enum PermissionMode {
     AcceptEdits,
     /// Deny anything that would ask; never prompt.
     DenyAll,
-    /// Every call the harness gates allow. Requires `--allow-yolo`.
+    /// Every call runs without approval; deny rules and the harness guards
+    /// still apply. Requires `--allow-skip-ask` or `--allow-yolo`.
+    SkipAsk,
+    /// No restrictions. Requires `--allow-yolo`.
     Yolo,
 }
 
@@ -59,6 +63,7 @@ impl PermissionMode {
             "normal" | "ask" | "default" => Some(Self::Ask),
             "accept-edits" | "acceptedits" => Some(Self::AcceptEdits),
             "deny-all" | "denyall" | "dont-ask" | "dontask" => Some(Self::DenyAll),
+            "skip-ask" | "skipask" => Some(Self::SkipAsk),
             "yolo" => Some(Self::Yolo),
             _ => None,
         }
@@ -69,17 +74,19 @@ impl PermissionMode {
             Self::Ask => "normal",
             Self::AcceptEdits => "accept-edits",
             Self::DenyAll => "deny-all",
+            Self::SkipAsk => "skip-ask",
             Self::Yolo => "yolo",
         }
     }
 
     /// The policy engine's mode. The HTTP name and the config name are the
-    /// same four modes; `plan` stays a CLI/TUI flow.
+    /// same five modes; `plan` stays a CLI/TUI flow.
     pub fn policy(self) -> crate::policy::PermissionMode {
         match self {
             Self::Ask => crate::policy::PermissionMode::Ask,
             Self::AcceptEdits => crate::policy::PermissionMode::AcceptEdits,
             Self::DenyAll => crate::policy::PermissionMode::DenyAll,
+            Self::SkipAsk => crate::policy::PermissionMode::SkipAsk,
             Self::Yolo => crate::policy::PermissionMode::Yolo,
         }
     }
@@ -200,6 +207,7 @@ impl Live {
 pub struct State {
     host: Host,
     token: String,
+    allow_skip_ask: bool,
     allow_yolo: bool,
     /// Cancelled after running turns have stopped; ends SSE streams.
     shutdown: CancellationToken,
@@ -210,10 +218,17 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(host: Host, token: String, allow_yolo: bool, shutdown: CancellationToken) -> Self {
+    pub fn new(
+        host: Host,
+        token: String,
+        allow_skip_ask: bool,
+        allow_yolo: bool,
+        shutdown: CancellationToken,
+    ) -> Self {
         Self {
             host,
             token,
+            allow_skip_ask: allow_skip_ask || allow_yolo,
             allow_yolo,
             shutdown,
             stopping: std::sync::atomic::AtomicBool::new(false),
@@ -480,7 +495,7 @@ async fn create_session(state: &Arc<State>, body: Value) -> Response<Body> {
             Some(mode) => mode,
             None => {
                 return bad_request(format!(
-                    "unknown permission_mode {raw:?}; use normal, accept-edits, deny-all, or yolo"
+                    "unknown permission_mode {raw:?}; use normal, accept-edits, deny-all, skip-ask, or yolo"
                 ));
             }
         },
@@ -491,6 +506,13 @@ async fn create_session(state: &Arc<State>, body: Value) -> Response<Body> {
             StatusCode::FORBIDDEN,
             "mode_not_permitted",
             "permission_mode \"yolo\" needs the operator to start the server with `tot serve --allow-yolo`",
+        );
+    }
+    if mode == PermissionMode::SkipAsk && !state.allow_skip_ask {
+        return error(
+            StatusCode::FORBIDDEN,
+            "mode_not_permitted",
+            "permission_mode \"skip-ask\" needs the operator to start the server with `tot serve --allow-skip-ask` (or `--allow-yolo`)",
         );
     }
     let resume = match body.get("resume") {
@@ -765,6 +787,7 @@ mod tests {
             PolicyMode::AcceptEdits
         );
         assert_eq!(PermissionMode::DenyAll.policy(), PolicyMode::DenyAll);
+        assert_eq!(PermissionMode::SkipAsk.policy(), PolicyMode::SkipAsk);
         assert_eq!(PermissionMode::Yolo.policy(), PolicyMode::Yolo);
     }
 
@@ -814,6 +837,7 @@ mod tests {
             ("ask", PermissionMode::Ask),
             ("accept-edits", PermissionMode::AcceptEdits),
             ("deny-all", PermissionMode::DenyAll),
+            ("skip-ask", PermissionMode::SkipAsk),
             ("YOLO", PermissionMode::Yolo),
         ] {
             assert_eq!(PermissionMode::parse(raw), Some(mode));

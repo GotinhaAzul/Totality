@@ -7,7 +7,28 @@ release may change defaults when the change is called out below.
 
 ## [Unreleased]
 
+### Changed
+
+- `--yolo` is now unrestricted: besides approvals, it turns off deny rules,
+  the provenance approval after an injection warning (the warning is still
+  shown, and the bypass is recorded as a `provenance-approval` entry with
+  `decision: "bypassed"`), and the destructive git guard in `bash`/`bg`. The
+  sandbox, path jail, engagement scope, and hooks keep their own settings.
+  The old behavior is the new `skip-ask` level.
+- A headless run that hits a provenance approval no longer tells the model to
+  `/approve` in a TUI it does not have: the denial says nothing in this run
+  can approve it, not to retry, and to report it, so the turn ends instead of
+  looping until the stall guard
+  ([#189](https://github.com/GotinhaAzul/LocalHarness/issues/189)).
+
 ### Added
+
+- `skip-ask` permission level (`--skip-ask`, `/permissions skip-ask`,
+  `"permission_mode": "skip-ask"` with `tot serve --allow-skip-ask`): every
+  call runs without asking, while deny rules, the provenance approval, and the
+  destructive git guard still apply. Like `yolo`, it needs a one-key
+  confirmation in the TUI, cannot be set in a config file, and is recorded in
+  the session.
 
 - A failed tool-call conformance probe picks the weak-model surface when
   nothing is pinned ([#144](https://github.com/GotinhaAzul/Totality/issues/144)):

@@ -51,7 +51,9 @@ pub struct ServeOptions {
     pub bind: String,
     pub allow_non_loopback: bool,
     pub token_file: Option<PathBuf>,
-    /// Let a session request `permission_mode: "yolo"`.
+    /// Let a session request `permission_mode: "skip-ask"`.
+    pub allow_skip_ask: bool,
+    /// Let a session request `permission_mode: "yolo"` (or `"skip-ask"`).
     pub allow_yolo: bool,
     pub engagement: Option<String>,
     pub no_session: bool,
@@ -172,6 +174,7 @@ pub async fn run(config: Config, paths: Paths, options: ServeOptions) -> Result<
     let state = Arc::new(api::State::new(
         host,
         token,
+        options.allow_skip_ask,
         options.allow_yolo,
         shutdown.clone(),
     ));

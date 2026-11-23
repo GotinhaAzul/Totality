@@ -143,7 +143,9 @@ impl BashTool {
         if let Err(message) = gate {
             return ToolResult::err("SEC_SCOPE", message);
         }
-        if let Some(message) = crate::tools::git::destructive_git(&command) {
+        if !ctx.unrestricted
+            && let Some(message) = crate::tools::git::destructive_git(&command)
+        {
             return ToolResult::err("GIT_DESTRUCTIVE", message);
         }
 
@@ -472,6 +474,7 @@ pub(crate) fn test_context(dir: &Path) -> ToolContext {
         vision: Default::default(),
         caps: Default::default(),
         format_on_edit: false,
+        unrestricted: false,
     }
 }
 
@@ -561,6 +564,25 @@ mod tests {
             "private /tmp must be writable: {}",
             temp.content
         );
+    }
+
+    #[tokio::test]
+    async fn the_destructive_git_guard_is_off_only_when_unrestricted() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = json!({"command": "git tag -d does-not-exist 2>/dev/null; echo ran"});
+        let mut ctx = test_context(dir.path());
+        let refused = BashTool.call(&ctx, command.clone()).await;
+        assert!(refused.is_error, "{}", refused.content);
+        assert!(
+            refused.content.contains("GIT_DESTRUCTIVE"),
+            "{}",
+            refused.content
+        );
+
+        ctx.unrestricted = true;
+        let ran = BashTool.call(&ctx, command).await;
+        assert!(!ran.content.contains("GIT_DESTRUCTIVE"), "{}", ran.content);
+        assert!(ran.content.contains("ran"), "{}", ran.content);
     }
 
     #[tokio::test]

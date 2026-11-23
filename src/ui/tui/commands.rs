@@ -549,8 +549,8 @@ impl App {
     }
 
     /// `/permissions`: pick or set what runs without asking. Levels are
-    /// `normal`, `accept-edits`, `deny-all`, and `yolo`; plan mode keeps its
-    /// own command.
+    /// `normal`, `accept-edits`, `deny-all`, `skip-ask`, and `yolo`; plan
+    /// mode keeps its own command.
     pub(super) async fn command_permissions(&mut self, rest: &str) {
         use crate::policy::PermissionMode;
 
@@ -585,7 +585,7 @@ impl App {
         }
         let Some(mode) = PermissionMode::parse(argument) else {
             self.set_notice(
-                "permissions: normal, accept-edits, deny-all, yolo, or why",
+                "permissions: normal, accept-edits, deny-all, skip-ask, yolo, or why",
                 Role::Error,
             );
             return;
@@ -597,10 +597,14 @@ impl App {
         let already = self
             .core()
             .is_some_and(|core| core.permissions.mode() == mode);
-        if mode == PermissionMode::Yolo && !already {
-            self.pending_mode_confirm = Some(PermissionMode::Yolo);
+        if mode.explicit_only() && !already {
+            self.pending_mode_confirm = Some(mode);
             self.set_notice(
-                "yolo allows every call without asking (deny rules still apply): press y to confirm, any other key cancels",
+                if mode.unrestricted() {
+                    "yolo removes every restriction (approvals, deny rules, provenance, destructive git guard): press y to confirm, any other key cancels"
+                } else {
+                    "skip-ask allows every call without asking (deny rules and guards still apply): press y to confirm, any other key cancels"
+                },
                 Role::Warning,
             );
             return;
@@ -609,7 +613,8 @@ impl App {
     }
 
     /// Switch the session's permission level. The config file is never
-    /// touched, and `yolo` is recorded in the session like `--yolo`.
+    /// touched, and `skip-ask` / `yolo` are recorded in the session like
+    /// their flags.
     pub(super) async fn set_permission_mode(&mut self, mode: crate::policy::PermissionMode) {
         let Some(core) = self.core().cloned() else {
             return;
@@ -647,16 +652,16 @@ impl App {
                 tracing::warn!(%error, "cannot record the permission-mode change");
             }
         }
-        if mode == crate::policy::PermissionMode::Yolo {
+        if mode.explicit_only() {
             self.transcript.push_note(
                 "session warning",
-                "yolo: every tool call runs without asking; only deny rules still apply",
+                format!("{}: {}", mode.label(), mode.description()),
                 false,
             );
         }
         self.set_notice(
             format!("permissions: {} — {}", mode.label(), mode.description()),
-            if mode == crate::policy::PermissionMode::Yolo {
+            if mode.explicit_only() {
                 Role::Warning
             } else {
                 Role::Success

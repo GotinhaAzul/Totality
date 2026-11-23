@@ -1003,34 +1003,38 @@ async fn the_session_header_records_the_mode_and_rule_hash() {
 }
 
 #[tokio::test]
-async fn yolo_is_explicit_and_logged_in_the_session() {
-    let (base, _) = spawn().await;
-    let env = env();
-    // A config file cannot select yolo.
-    std::fs::create_dir_all(&env.config_dir).unwrap();
-    std::fs::write(
-        env.config_dir.join("config.toml"),
-        "[permissions]\nmode = \"yolo\"\n",
-    )
-    .unwrap();
-    let refused = run_tot(&env, &base, &["--print", "hi"]).await;
-    assert_ne!(refused.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("--yolo"));
-    let refused = run_tot(&env, &base, &["--mode", "yolo", "--print", "hi"]).await;
-    assert_ne!(refused.status.code(), Some(0));
+async fn yolo_and_skip_ask_are_explicit_and_logged_in_the_session() {
+    for label in ["yolo", "skip-ask"] {
+        let flag = format!("--{label}");
+        let (base, _) = spawn().await;
+        let env = env();
+        // A config file cannot select either level.
+        std::fs::create_dir_all(&env.config_dir).unwrap();
+        std::fs::write(
+            env.config_dir.join("config.toml"),
+            format!("[permissions]\nmode = \"{label}\"\n"),
+        )
+        .unwrap();
+        let refused = run_tot(&env, &base, &["--print", "hi"]).await;
+        assert_ne!(refused.status.code(), Some(0));
+        assert!(String::from_utf8_lossy(&refused.stderr).contains(&flag));
+        let refused = run_tot(&env, &base, &["--mode", label, "--print", "hi"]).await;
+        assert_ne!(refused.status.code(), Some(0));
+        assert!(String::from_utf8_lossy(&refused.stderr).contains(&flag));
 
-    std::fs::remove_file(env.config_dir.join("config.toml")).unwrap();
-    let output = run_tot_persistent(&env, &base, &["--yolo", "--print", "hi"]).await;
-    assert_eq!(output.status.code(), Some(0));
-    let lines = session_lines(&env);
-    assert_eq!(lines[0]["data"]["permissions"]["mode"], "yolo");
-    assert!(
-        lines.iter().any(|line| line["type"] == "custom"
-            && line["data"]["kind"] == "permission-mode"
-            && line["data"]["mode"] == "yolo"
-            && line["data"]["source"] == "--yolo"),
-        "{lines:#?}"
-    );
+        std::fs::remove_file(env.config_dir.join("config.toml")).unwrap();
+        let output = run_tot_persistent(&env, &base, &[flag.as_str(), "--print", "hi"]).await;
+        assert_eq!(output.status.code(), Some(0));
+        let lines = session_lines(&env);
+        assert_eq!(lines[0]["data"]["permissions"]["mode"], label);
+        assert!(
+            lines.iter().any(|line| line["type"] == "custom"
+                && line["data"]["kind"] == "permission-mode"
+                && line["data"]["mode"] == label
+                && line["data"]["source"] == flag.as_str()),
+            "{lines:#?}"
+        );
+    }
 }
 
 #[tokio::test]

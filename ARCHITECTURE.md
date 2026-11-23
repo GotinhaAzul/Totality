@@ -361,7 +361,7 @@ observable.
 
 | Guard | Behavior |
 |---|---|
-| Permission policy | Evaluated first for every repaired call (`agent/authorize.rs`, `policy/`). Ordered `[permissions]` rules match on tool glob, path glob, command regex, and network; the last matching rule wins, except that a `deny` holds against any later `allow`/`ask` that is not strictly more specific. No match falls back to the mode: `ask`, `accept-edits`, `plan`, `dont-ask`, or `yolo` (flag only). A deny or plan-mode refusal returns `DENIED`/`plan_mode` with the rule id and the turn continues; an `ask` is resolved after the other gates pass, and an approval covers exactly that command or path for the session. See 8.13. |
+| Permission policy | Evaluated first for every repaired call (`agent/authorize.rs`, `policy/`). Ordered `[permissions]` rules match on tool glob, path glob, command regex, and network; the last matching rule wins, except that a `deny` holds against any later `allow`/`ask` that is not strictly more specific. No match falls back to the mode: `ask`, `accept-edits`, `plan`, `dont-ask`, `skip-ask`, or `yolo` (flags only; `yolo` also ignores deny rules, the provenance approval, and the destructive git guard). A deny or plan-mode refusal returns `DENIED`/`plan_mode` with the rule id and the turn continues; an `ask` is resolved after the other gates pass, and an approval covers exactly that command or path for the session. See 8.13. |
 | Read-before-edit | `edit`/`patch` on an existing file require a prior `read` with a matching stat stamp (`mtime`, size). `write` also requires full-line coverage of the existing file, or an explicit `overwrite: true`; a result capped by the result or batch limit marks coverage incomplete. A changed file requires a re-read. Creation is allowed. A successful `edit`/`patch`/`write` re-stamps only the file it wrote, so consecutive edits need no re-read while any outside change still does. |
 | Scope gate | Security-sensitive commands are checked against the user-set engagement scope. No scope blocks with `SEC_SCOPE` and the `/sec scope add` call. Best-effort, not a sandbox. |
 | Sandbox | When `--sandbox` is set, `bash` and `bg` run in a bubblewrap namespace (or the Landlock fallback): read-only root, hidden `$HOME`, private `/tmp`, no network, and `.git` read-only in `workspace-write`. Startup fails closed when no backend exists; a per-command wrap failure returns `SANDBOX_UNAVAILABLE`. Commands never fall back to an unsandboxed run. |
@@ -1735,9 +1735,12 @@ given, or a frontend approver attached) is resolved by
   `undo`), or exec (everything else, including MCP and external tools).
   Read-only and session calls run in every mode unless a rule says otherwise.
 - `ask` asks for edits and exec; `accept-edits` runs edits unasked;
-  `dont-ask` denies instead of asking; `yolo` runs everything a deny rule does
-  not block. `yolo` is accepted only from `--yolo`, never from a config file,
-  and is recorded in the session header plus a `permission-mode` entry.
+  `dont-ask` denies instead of asking; `skip-ask` runs everything a deny rule
+  does not block; `yolo` runs everything, skipping deny rules, the provenance
+  approval, and the destructive git guard (sandbox, path jail, scope, and
+  hooks still apply). Both are accepted only from `--skip-ask` / `--yolo` or
+  `/permissions`, never from a config file, and are recorded in the session
+  header plus a `permission-mode` entry.
 - Asking needs a frontend: the TUI prompts, ACP defers to the client's
   permission request, and headless runs deny.
 - `plan` refuses every call that is not read-only (or `todo`) with
@@ -1960,7 +1963,7 @@ exits with the turn status. `--json` emits newline-delimited events for
 scripting; `usage` events include `prompt_tokens`, `cached_tokens`, and
 `cache_percent`. The same core and session code is used. This is not a second
 implementation. Nobody can answer a permission `ask` headless, so it is denied
-with `DENIED`; pass `--mode accept-edits`, add allow rules, or `--yolo`.
+with `DENIED`; pass `--mode accept-edits`, add allow rules, `--skip-ask`, or `--yolo`.
 `--plan --print` runs one plan-mode turn, prints the stored plan (a `plan`
 event with `--json`), and exits 0 without touching the workspace. The event
 schema (`type` names and fields) lives in `src/events.rs`, an exhaustive match
@@ -2022,7 +2025,7 @@ non-read-only tool call.
   per-session buffer replays from `?after=` or `Last-Event-ID`. The `done`
   frame is published after the session is released.
 - Permission: an HTTP turn cannot ask. Each session picks `permission_mode`
-  (`ask` default, `accept-edits`, `dont-ask`, `yolo` behind `--allow-yolo`)
+  (`ask` default, `accept-edits`, `dont-ask`, `skip-ask` behind `--allow-skip-ask`, `yolo` behind `--allow-yolo`)
   and the mode is installed on the session's permission engine before the
   runtime is built. `authorize::decide()` is the single pre-dispatch point:
   config `[permissions]` allow/deny rules decide first, a deny wins, and an
