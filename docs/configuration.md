@@ -70,7 +70,7 @@ and `TOT_DATA_DIR` pins the root outright.
 
 ```toml
 default_profile = "coding"      # coding | full | security | minimal | strict | shell | custom
-review = "multi_file"           # always | multi_file | off (see below)
+review = "auto"                 # auto | always | multi_file | off (see below)
 
 [model]
 endpoint = "http://127.0.0.1:8080"
@@ -112,50 +112,35 @@ redact = true                   # redact secret values before persistence
 artifact_retention_days = 30
 
 [budgets]
-# Checkpoints, not hard caps. When one is reached and the run produced a new
-# result, a file change, or a passing verify within the last `stall_calls`
-# calls, the allowance renews and the turn keeps going. The first no-progress
-# stop in a turn (a checkpoint or the stall guard) asks the model to switch
-# approach and grants one more allowance; the second, or the loop guard, ends
-# the turn.
+# One progress ledger classifies every tool result: `changed` (a file changed,
+# or the workspace moved under an idle streak, as a `sed -i` does), `verified`
+# (a project verify passed), `learned` (a success whose output was not seen
+# this turn; the `[tool]` header line is ignored, so different arguments with
+# the same answer are not news), or `failed-new` (an error not seen this turn,
+# ignoring the call's own arguments echoed back, so `cat missing-3.txt` and
+# `cat missing-4.txt` fail the same way). Anything else is idle.
+#
+# `idle_budget` idle calls within the last 2 x idle_budget calls since the last
+# change or passing verify is a stall. The first stall in a turn asks the model
+# to change approach and resets the count; the second ends the turn as
+# `stalled`. The loop guard's exact repeats and cycles spend the whole budget
+# at once. Distinct exploration (many reads, `python3 -c` probes with new
+# output, a `bg logs` poll with growing output) is never idle, so it keeps
+# running; the same command re-run between new probes still stalls.
+idle_budget = 8                 # `stall_calls` is accepted as an alias
+# Checkpoints, not hard caps: one renews when the ledger saw a change, a
+# passing verify, or a new result since the last one (a new error alone does
+# not). A checkpoint with no progress pivots once like a stall, then ends the
+# turn.
 max_tool_calls = 120
 max_model_calls = 40
 max_wall_minutes = 30           # at least 6 model calls at the measured speed
-stall_calls = 12
-# Repeated or failing calls of one tool family allowed in a turn before it
-# stops as stalled. A family is `bash`'s program and subcommand, or another
-# tool's name plus its key arguments (a body argument such as `content` does
-# not create a new family). Temporary-path and number normalization apply to
-# bash families only: `tesseract /tmp/a/r.png --psm 6` and
-# `tesseract /tmp/b/r.png --psm 3` are one family, while two `read` calls for
-# different paths are two. Interleaving, an exit-0 call of the family, and a
-# success that changes nothing do not reset the count; a workspace change or a
-# passing verify does. Read-only calls are not counted as repeats (and a
-# failing read-only call still counts as a failure); a read repeated with the
-# same output is caught by `stall_calls` instead. 0 disables the guard.
-max_same_tool_family = 8
-# Successful calls of one family that changed no workspace file and passed no
-# verify, allowed in a turn. A same-family success does not reset it, so a
-# model that reruns OCR or conversion probes forever is stopped even when every
-# probe exits 0. Inspection is exempt: read-only tools (read, grep, glob,
-# recall, repo_map, lsp, evidence, fetch, skill, review, iocs, surface,
-# attack_path); the reading actions of mixed tools (bg logs/status, todo list,
-# thread status, finding list, detect validate, pr checks/review,
-# git commit_message, git branch|worktree op = "list");
-# and bash commands that only read (cat, ls, rg, git show, git ls-files,
-# curl/wget without a writing flag, gh pr view|list|diff|checks,
-# gh issue view|list, and a gh api GET).
-# A long exploratory analysis turn with many distinct `python3 -c` probes and
-# no file writes can reach this limit, because each probe exits 0 and changed
-# nothing. Raise `max_same_tool_family_success` for that kind of work, or set it
-# to 0 to disable the guard. Writes outside the session directory, including
-# temporary paths, do not count as progress.
-max_same_tool_family_success = 24
 verify_attempts = 2
 
 [gates]
 auto_settle = true              # the harness runs verify and review when the model settles
 verify_detected = true          # no steps configured: use the ones detected from the manifest
+todo_plan = "derive"            # derive | require | off: the plan gate at the third distinct file
 
 [prompt]
 identity = ""                   # replaces the built-in one-line identity
@@ -356,10 +341,19 @@ grammars.
 `review` decides whether `edit`, `patch`, and `write` land immediately or wait
 for the TUI's hunk list:
 
-- `multi_file` (default) opens the review when a turn is about to touch a
-  second file. The first file still lands immediately.
+- `auto` (default) opens the review for a risky single-file change and when a
+  turn is about to touch a second file. Risky means a lockfile, a config or
+  credential file such as `.env`, a CI workflow under `.github/workflows/`, or
+  new content that matches a secret pattern. A safe single-file source edit
+  still lands immediately.
+- `multi_file` opens the review when a turn is about to touch a second file.
+  The first file still lands immediately.
 - `always` reviews every mutation, including a single-file edit.
 - `off` writes immediately, exactly as before the feature existed.
+
+The `hunk-review` session entry records the rule that opened the review as
+`trigger`: `risk:lockfile`, `risk:config`, `risk:ci_workflow`, `risk:secret`,
+`multi_file`, or `always`.
 
 In the review modal, `a` accepts the selected hunk, `r` rejects it, `e` opens
 its replacement text in the prompt (Enter saves, Esc cancels), `A`/`R` accept
@@ -753,6 +747,18 @@ panics, tsc, Python tracebacks, pytest, Go, gcc and eslint shapes) are attached
 with three lines of context each and count as read. Only existing files under
 the working directory count; `target/`, `node_modules/`, virtualenvs and build
 output are skipped.
+
+`[gates] todo_plan` decides what happens when a run without a plan edits its
+third distinct file. `derive` (default) records the plan itself from session
+facts and lets the edit run: `change <file>` for each file already changed
+(completed), `change <target>` (in progress), and `verify` (pending) when
+verification is configured. The entry is a normal `todo-state` with
+`source: "harness"`; it follows the run to each new file, is settled when
+the turn ends (changes completed, `verify` completed only after a fresh
+passing verify), and a model
+`todo action="plan"` replaces it for good. `require` keeps the older
+behavior: the edit is refused with `TODO_PLAN` until the model writes a plan.
+`off` removes the gate.
 
 With no configured or accepted steps, `[gates] verify_detected` (default
 `true`) uses the steps detected from the project manifest (`Cargo.toml`,

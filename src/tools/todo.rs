@@ -56,6 +56,9 @@ struct Task {
 struct TodoState {
     tasks: Vec<Task>,
     note: Option<String>,
+    /// `harness` when the harness derived the plan from changed files
+    /// (`[gates] todo_plan = "derive"`); absent for a model-written plan.
+    source: Option<String>,
 }
 
 impl TodoState {
@@ -79,6 +82,9 @@ impl TodoState {
         if let Some(note) = &self.note {
             payload.insert("note".into(), json!(note));
         }
+        if let Some(source) = &self.source {
+            payload.insert("source".into(), json!(source));
+        }
         payload
     }
 
@@ -97,6 +103,9 @@ impl TodoState {
         let mut out = format!("todos: {done}/{total} completed");
         if active > 0 {
             out.push_str(&format!(", {active} in progress"));
+        }
+        if self.source.as_deref() == Some(crate::agent::gates::DERIVED_PLAN_SOURCE) {
+            out.push_str(" (derived by the harness from changed files; plan replaces it)");
         }
         out.push('\n');
         for (index, task) in self.tasks.iter().enumerate() {
@@ -171,7 +180,16 @@ fn read_state(session: &Session) -> TodoState {
         .and_then(|v| v.as_str())
         .filter(|note| !note.trim().is_empty())
         .map(str::to_string);
-    TodoState { tasks, note }
+    let source = custom
+        .payload
+        .get("source")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    TodoState {
+        tasks,
+        note,
+        source,
+    }
 }
 
 /// Status of one plan step, for display.
@@ -315,7 +333,7 @@ impl Tool for TodoTool {
     }
 
     fn description(&self) -> &'static str {
-        "Plan and track tasks; required after two mutations."
+        "Plan and track tasks."
     }
 
     fn schema(&self) -> Value {
@@ -411,7 +429,11 @@ fn plan(_ctx: &ToolContext, args: &Value) -> ToolResult {
     let note = optional_str(args, "note")
         .map(|note| note.trim().to_string())
         .filter(|note| !note.is_empty());
-    let state = TodoState { tasks, note };
+    let state = TodoState {
+        tasks,
+        note,
+        source: None,
+    };
     let content = format!("{}\nstarted: 1. {}", state.render(), state.tasks[0].content);
     ToolResult::ok(content).with_details(state_details(&state))
 }

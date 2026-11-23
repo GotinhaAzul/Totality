@@ -100,6 +100,8 @@ pub struct GatesConfig {
     /// from the project manifest for this session. They run through the
     /// permission policy like any command and are not saved.
     pub verify_detected: bool,
+    /// What happens when a run without a plan edits its third distinct file.
+    pub todo_plan: TodoPlanMode,
 }
 
 impl Default for GatesConfig {
@@ -107,8 +109,23 @@ impl Default for GatesConfig {
         Self {
             auto_settle: true,
             verify_detected: true,
+            todo_plan: TodoPlanMode::default(),
         }
     }
+}
+
+/// `[gates] todo_plan`: the plan gate at the third distinct file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TodoPlanMode {
+    /// The harness records a plan from the files the run changed and lets
+    /// the edit run; a model-written plan replaces it.
+    #[default]
+    Derive,
+    /// Block the edit with `TODO_PLAN` until the model calls `todo plan`.
+    Require,
+    /// No plan gate.
+    Off,
 }
 
 /// `[format]`: run the project's formatter on content `edit`, `patch`, and
@@ -375,6 +392,7 @@ impl Config {
         let mut rules: Vec<toml::Value> = Vec::new();
         if global.exists() {
             let mut raw = read_toml(global)?;
+            migrate_budgets(&mut raw, global);
             rules.extend(take_permission_rules(&mut raw));
             deep_merge(&mut value, raw);
         }
@@ -382,6 +400,7 @@ impl Config {
             && project.exists()
         {
             let mut raw = read_toml(project)?;
+            migrate_budgets(&mut raw, project);
             rules.extend(take_permission_rules(&mut raw));
             deep_merge(&mut value, raw);
         }
@@ -454,17 +473,8 @@ impl Config {
         if self.budgets.max_tool_calls == 0 {
             bail!("budgets.max_tool_calls must be at least 1");
         }
-        // Zero disables these two; 1 would end a turn on the very first call.
-        for (key, value) in [
-            ("max_same_tool_family", self.budgets.max_same_tool_family),
-            (
-                "max_same_tool_family_success",
-                self.budgets.max_same_tool_family_success,
-            ),
-        ] {
-            if value == 1 {
-                bail!("budgets.{key} must be 0 (disabled) or at least 2");
-            }
+        if self.budgets.idle_budget == 0 {
+            bail!("budgets.idle_budget must be at least 1");
         }
         if self.model.context_window == Some(0) {
             bail!("model.context_window must be greater than 0");
@@ -927,8 +937,11 @@ pub enum ReviewMode {
     /// Review every mutation before it is written.
     Always,
     /// Review once a turn is about to touch a second file.
-    #[default]
     MultiFile,
+    /// Review a single-file mutation when its path or new text is risky, and
+    /// otherwise once a turn is about to touch a second file.
+    #[default]
+    Auto,
     /// Write immediately, exactly as before the review feature.
     Off,
 }
@@ -938,6 +951,7 @@ impl ReviewMode {
         match self {
             ReviewMode::Always => "always",
             ReviewMode::MultiFile => "multi_file",
+            ReviewMode::Auto => "auto",
             ReviewMode::Off => "off",
         }
     }
@@ -948,6 +962,7 @@ impl ReviewMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "always" => Some(ReviewMode::Always),
             "multi_file" | "multi-file" | "multi" => Some(ReviewMode::MultiFile),
+            "auto" => Some(ReviewMode::Auto),
             "off" | "never" | "none" => Some(ReviewMode::Off),
             _ => None,
         }
@@ -1094,27 +1109,19 @@ impl HookOnError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BudgetConfig {
-    /// Tool-call checkpoint interval. Productive runs renew; a run with no
-    /// new result or file change in the last `stall_calls` calls stops.
+    /// Tool-call checkpoint interval. A checkpoint renews when the run made
+    /// progress since the last one (a file change, a passing verify, or a
+    /// new result).
     pub max_tool_calls: u32,
     /// Model-call checkpoint interval, with the same renewal rule.
     pub max_model_calls: u32,
     /// Wall-clock checkpoint interval, with the same renewal rule.
     pub max_wall_minutes: u32,
-    /// Consecutive identical calls and the no-progress window used by the
-    /// checkpoints.
-    pub stall_calls: u32,
-    /// Failing or repeated calls of one tool family (same program and
-    /// operation, or same tool and key arguments) allowed in a turn before it
-    /// stops as stalled. Zero disables the guard. Read-only calls are not
-    /// counted as repeats; a read repeated with the same output is caught by
-    /// `stall_calls`.
-    pub max_same_tool_family: u32,
-    /// Successful calls of one tool family that changed no workspace file and
-    /// passed no verify allowed in a turn before it stops as stalled. A
-    /// same-family success does not reset the count. Read-only calls are
-    /// exempt. Zero disables the guard.
-    pub max_same_tool_family_success: u32,
+    /// Idle calls — no file change, no passing verify, no new result, no new
+    /// error — within the last twice as many calls (since the last file
+    /// change or passing verify) before the run pivots once and then stops as
+    /// stalled. `stall_calls` is accepted as an alias.
+    pub idle_budget: u32,
     pub verify_attempts: u32,
     /// Characters one tool result may occupy in context. Unset scales with
     /// the usable prompt (4%, clamped to 2500..16000).
@@ -1132,9 +1139,7 @@ impl Default for BudgetConfig {
             max_tool_calls: 120,
             max_model_calls: 40,
             max_wall_minutes: 30,
-            stall_calls: 12,
-            max_same_tool_family: 8,
-            max_same_tool_family_success: 24,
+            idle_budget: 8,
             verify_attempts: 2,
             result_cap_chars: None,
             batch_cap_chars: None,
@@ -1691,6 +1696,26 @@ impl VerifyConfig {
     }
 }
 
+/// `[budgets]` keys the progress ledger replaced: `stall_calls` becomes
+/// `idle_budget` (an explicit `idle_budget` wins), and the tool-family budgets
+/// are dropped with a warning. Their work is the ledger's idle count now.
+fn migrate_budgets(raw: &mut toml::Value, path: &Path) {
+    let Some(budgets) = raw.get_mut("budgets").and_then(toml::Value::as_table_mut) else {
+        return;
+    };
+    if let Some(value) = budgets.remove("stall_calls") {
+        budgets.entry("idle_budget").or_insert(value);
+    }
+    for key in ["max_same_tool_family", "max_same_tool_family_success"] {
+        if budgets.remove(key).is_some() {
+            tracing::warn!(
+                "{}: budgets.{key} is deprecated and ignored; the progress ledger's budgets.idle_budget replaces it",
+                path.display()
+            );
+        }
+    }
+}
+
 fn read_toml(path: &Path) -> Result<toml::Value> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
@@ -2094,26 +2119,24 @@ thinking_control = { chat_template_kwargs = { enable_thinking = false } }
     }
 
     #[test]
-    fn family_budgets_accept_zero_and_reject_one() {
+    fn old_progress_budgets_migrate_to_idle_budget() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "[budgets]\nmax_same_tool_family = 0\nmax_same_tool_family_success = 0\n",
+            "[budgets]\nstall_calls = 20\nmax_same_tool_family = 0\nmax_same_tool_family_success = 30\n",
         )
         .unwrap();
         let cfg = Config::load(&path, None).unwrap();
-        assert_eq!(cfg.budgets.max_same_tool_family, 0, "0 disables the guard");
-        assert_eq!(cfg.budgets.max_same_tool_family_success, 0);
+        assert_eq!(cfg.budgets.idle_budget, 20, "stall_calls is the alias");
 
-        std::fs::write(&path, "[budgets]\nmax_same_tool_family_success = 1\n").unwrap();
-        let error = Config::load(&path, None).unwrap_err().to_string();
-        assert!(error.contains("max_same_tool_family_success"), "{error}");
-        assert!(error.contains("0 (disabled) or at least 2"), "{error}");
+        std::fs::write(&path, "[budgets]\nstall_calls = 20\nidle_budget = 7\n").unwrap();
+        let cfg = Config::load(&path, None).unwrap();
+        assert_eq!(cfg.budgets.idle_budget, 7, "the new key wins");
 
-        std::fs::write(&path, "[budgets]\nmax_same_tool_family = 1\n").unwrap();
+        std::fs::write(&path, "[budgets]\nidle_budget = 0\n").unwrap();
         let error = Config::load(&path, None).unwrap_err().to_string();
-        assert!(error.contains("max_same_tool_family must be"), "{error}");
+        assert!(error.contains("idle_budget must be at least 1"), "{error}");
     }
 
     #[test]

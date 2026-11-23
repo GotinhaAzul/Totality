@@ -105,8 +105,8 @@ language-server diagnostics after edits; `verify` with a target that runs one
 test and returns the first failure, not ten thousand lines. Oversized output
 is archived and recalled by exact range.
 
-**Hunk review.** Before a multi-file change lands, Totality shows you the hunks.
-Accept, reject, or edit each one; only what you accept is written.
+**Hunk review.** Before a risky or multi-file change lands, Totality shows you
+the hunks. Accept, reject, or edit each one; only what you accept is written.
 
 **Sessions are a tree.** Fork, rewind files and conversation to any earlier
 turn, resume tomorrow. Compaction is deterministic and the request prefix stays
