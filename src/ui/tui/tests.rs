@@ -1901,3 +1901,103 @@ async fn init_review_esc_writes_nothing_and_esc_cancels_a_draft() {
     app.handle_key(key(KeyCode::Esc)).await;
     assert!(app.init_job.is_none(), "Esc cancels the draft");
 }
+
+#[tokio::test]
+async fn settings_lists_every_key_and_saves_a_change_to_the_global_config() {
+    let (dir, mut app) = test_app().await;
+    app.run_command("/settings").await;
+    let Some(ModalData::Picker(picker)) = &app.modal else {
+        panic!("expected the settings picker");
+    };
+    assert_eq!(picker.command, "settings");
+    assert_eq!(picker.items[0].label, "where");
+    assert_eq!(picker.items.len(), crate::settings::SETTINGS.len() + 1);
+    let review = picker
+        .items
+        .iter()
+        .find(|item| item.label == "review")
+        .expect("review row");
+    assert!(
+        review.description.starts_with("off"),
+        "{}",
+        review.description
+    );
+    let api_key = picker
+        .items
+        .iter()
+        .find(|item| item.label == "model.api_key")
+        .unwrap();
+    assert!(!api_key.description.contains("sk-"), "secrets stay hidden");
+    app.modal = None;
+
+    // A choice opens a value picker; Enter on a value saves and returns.
+    app.run_command("/settings review").await;
+    let Some(ModalData::Picker(values)) = &app.modal else {
+        panic!("expected the value picker");
+    };
+    assert_eq!(values.command, "settings-value");
+    assert_eq!(values.current, "off");
+    app.modal = None;
+
+    app.run_command("/settings review always").await;
+    assert_eq!(app.config.review, crate::config::ReviewMode::Always);
+    assert_eq!(
+        app.core().unwrap().config.review,
+        crate::config::ReviewMode::Always,
+        "the runtime was rebuilt with it"
+    );
+    app.run_command("/settings ui.bell false").await;
+    assert!(!app.config.ui.bell);
+    app.run_command("/settings budgets.idle_budget 12").await;
+    assert_eq!(app.core().unwrap().config.budgets.idle_budget, 12);
+
+    let path = dir.path().join("config").join("config.toml");
+    let saved: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["review"].as_str(), Some("always"));
+    assert_eq!(saved["ui"]["bell"].as_bool(), Some(false));
+    assert_eq!(saved["budgets"]["idle_budget"].as_integer(), Some(12));
+
+    // `-` restores the default and drops the key from the file.
+    app.run_command("/settings budgets.idle_budget -").await;
+    assert_eq!(app.config.budgets.idle_budget, 8);
+    assert!(!Config::file_sets_key(&path, "budgets.idle_budget"));
+
+    // A bad value changes nothing.
+    app.run_command("/settings review sometimes").await;
+    assert_eq!(app.config.review, crate::config::ReviewMode::Always);
+    app.run_command("/settings nope 1").await;
+    let notice = app.notice.as_ref().map(|(text, ..)| text.clone()).unwrap();
+    assert!(notice.contains("unknown setting"), "{notice}");
+
+    // From the picker: Enter on a value saves it and returns to the list
+    // with that key selected.
+    app.run_command("/settings gates.todo_plan").await;
+    app.handle_modal_key(key(KeyCode::Down)).await;
+    app.handle_modal_key(key(KeyCode::Enter)).await;
+    assert_eq!(
+        app.config.gates.todo_plan,
+        crate::config::TodoPlanMode::Require
+    );
+    let Some(ModalData::Picker(list)) = &app.modal else {
+        panic!("expected the settings list again");
+    };
+    assert_eq!(list.command, "settings");
+    assert_eq!(list.current, "gates.todo_plan");
+    // A bool row toggles in place.
+    app.modal = None;
+    app.run_command("/settings").await;
+    if let Some(ModalData::Picker(list)) = &mut app.modal {
+        list.selected = list
+            .filtered()
+            .iter()
+            .position(|item| item.label == "format.on_edit")
+            .unwrap();
+    }
+    app.handle_modal_key(key(KeyCode::Enter)).await;
+    assert!(!app.config.format.on_edit);
+    assert!(matches!(&app.modal, Some(ModalData::Picker(list)) if list.command == "settings"));
+
+    app.modal = None;
+    app.run_command("/settings where").await;
+    assert!(app.modal.is_none());
+}

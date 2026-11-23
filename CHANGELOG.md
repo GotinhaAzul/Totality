@@ -9,6 +9,11 @@ release may change defaults when the change is called out below.
 
 ### Changed
 
+- Hunk review is off by default (`review = "off"`): edits land immediately,
+  and the undo log and `/rewind` still cover them. Set `review = "auto"` (or
+  `/settings review auto`) for the previous pause before risky or multi-file
+  edits.
+
 - `--yolo` is now unrestricted: besides approvals, it turns off deny rules,
   the provenance approval after an injection warning (the warning is still
   shown, and the bypass is recorded as a `provenance-approval` entry with
@@ -22,6 +27,13 @@ release may change defaults when the change is called out below.
   ([#189](https://github.com/GotinhaAzul/LocalHarness/issues/189)).
 
 ### Added
+
+- `/settings`: one list of every configurable key with its current value and
+  what it does. Enter toggles, picks, or edits; the change is validated,
+  applied to the running session, and saved to the global config (`-`
+  restores a default). Rows note keys that take effect next launch and values
+  a `TOT_*` variable or trusted project config overrides. `/settings where`
+  shows the config files, directories, and collections.
 
 - `skip-ask` permission level (`--skip-ask`, `/permissions skip-ask`,
   `"permission_mode": "skip-ask"` with `tot serve --allow-skip-ask`): every

@@ -33,6 +33,7 @@ impl App {
             "login" => self.command_login(rest).await,
             "profile" => self.command_profile(rest).await,
             "theme" => self.command_theme(rest),
+            "settings" => self.command_settings(rest).await,
             "tree" => self.command_tree(),
             "rewind" => self.command_rewind(rest),
             "fork" => self.command_fork(),

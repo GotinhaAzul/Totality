@@ -28,6 +28,7 @@ pub mod sanitize;
 pub mod security;
 pub mod serve;
 pub mod session;
+pub mod settings;
 pub mod skills;
 pub mod text;
 pub mod tools;

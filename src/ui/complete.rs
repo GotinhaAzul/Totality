@@ -151,6 +151,7 @@ pub fn takes_args(command: &str) -> bool {
             | "login"
             | "profile"
             | "theme"
+            | "settings"
             | "resume"
             | "skill"
             | "workflow"
@@ -432,6 +433,30 @@ fn complete_argument(
             choices.extend(plain(&sources.themes, "theme"));
             choices
         }
+        ("settings", []) => {
+            let mut choices = vec![Candidate::new("where", "config files and collections")];
+            choices.extend(
+                crate::settings::SETTINGS
+                    .iter()
+                    .map(|setting| Candidate::new(setting.key, setting.about)),
+            );
+            choices
+        }
+        ("settings", [key]) => match crate::settings::find(key).map(|setting| setting.kind) {
+            Some(crate::settings::Kind::Bool) => {
+                vec![Candidate::new("true", ""), Candidate::new("false", "")]
+            }
+            Some(crate::settings::Kind::Choice(names)) => {
+                names.iter().map(|name| Candidate::new(*name, "")).collect()
+            }
+            Some(crate::settings::Kind::Profile) => sources
+                .profiles
+                .iter()
+                .map(|(name, description)| Candidate::new(name.clone(), description.clone()))
+                .collect(),
+            Some(crate::settings::Kind::Theme) => plain(&sources.themes, "theme"),
+            _ => return None,
+        },
         ("profile", []) => sources
             .profiles
             .iter()

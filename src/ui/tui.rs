@@ -54,6 +54,7 @@ mod git_commands;
 mod keys;
 mod permission;
 mod review;
+mod settings;
 mod support;
 mod terminal;
 #[cfg(test)]
@@ -69,6 +70,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("login", "configure the endpoint, model, and API key"),
     ("profile", "pick the tool profile"),
     ("theme", "pick a theme (live preview) or save it"),
+    (
+        "settings",
+        "see and change every setting, and where config lives",
+    ),
     ("tree", "browse the session tree and jump to any step"),
     (
         "rewind",
@@ -134,6 +139,9 @@ fn command_usage(name: &str) -> &'static str {
         "login" => "/login [endpoint] [model] [api-key|-]   (no arguments: show status)",
         "profile" => "/profile [name]   (no name: pick from a list)",
         "theme" => "/theme [name|save]   (no name: pick with live preview)",
+        "settings" => {
+            "/settings [where | <key> [value|-]]   (no argument: pick; - restores the default)"
+        }
         "resume" => "/resume [id|last]   (no id: pick from a list)",
         "rewind" => "/rewind [turns] [force]   (no argument: pick the message to go back before)",
         "tree" => {
@@ -160,7 +168,7 @@ fn command_usage(name: &str) -> &'static str {
 
 const HELP: &str = "\
 Commands: /help [command] /quit /login [endpoint] [model] [api-key] /model [name]
-[model-profile] /profile [name] /theme [name|save] /tree /rewind [turns] [force] /fork /new
+[model-profile] /profile [name] /theme [name|save] /settings [key [value]] /tree /rewind [turns] [force] /fork /new
 /resume [id|last] /sessions /compact /tools /mcp
 /commit [confirm|cancel|edit <message>] /pr [confirm|cancel] /plan [approve|exit]
 /permissions [normal|accept-edits|deny-all|skip-ask|yolo]
@@ -486,6 +494,8 @@ struct App {
     /// The theme to restore when a `/theme` picker previewing others is
     /// dismissed.
     theme_before_preview: Option<String>,
+    /// A `/settings` picker ran the next command, so a change returns to it.
+    settings_return: bool,
     /// Hunk review: the frontend seam the agent loop calls before a reviewed
     /// batch writes, and the hunk currently open in the prompt editor.
     reviewer: Arc<review::TuiReviewer>,
@@ -596,6 +606,7 @@ impl App {
             switching: None,
             init_job: None,
             theme_before_preview: None,
+            settings_return: false,
             reviewer,
             hunk_edit: None,
             repaint: false,

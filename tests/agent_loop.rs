@@ -284,6 +284,8 @@ fn base_config() -> Config {
     config.model.retry_backoff_ms = 1;
     // The existing settle tests script the model's verify/review calls.
     config.gates.auto_settle = false;
+    // Review is off by default; the review tests exercise the `auto` rules.
+    config.review = totality::config::ReviewMode::Auto;
     config.profiles.insert(
         "test".into(),
         ProfileConfig {
@@ -4072,10 +4074,11 @@ async fn auto_reviews_a_risky_single_file_edit_and_records_the_rule() {
         let reviewer = scripted_reviewer(vec![HunkDecision::reject_all(1)]);
         let mut config = base_config();
         assert_eq!(
-            config.review,
-            totality::config::ReviewMode::Auto,
-            "auto is the default"
+            Config::builtin().review,
+            totality::config::ReviewMode::Off,
+            "off is the default"
         );
+        config.review = totality::config::ReviewMode::Auto;
         config.profiles.get_mut("test").expect("test profile").tools =
             ["read", "edit"].map(str::to_string).to_vec();
         let harness = harness_config(dir.path(), single_edit_scripts(path, "one", "two"), config);
