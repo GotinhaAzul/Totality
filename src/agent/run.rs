@@ -3383,6 +3383,18 @@ async fn execute_batch(
                 .map(|writes| writes[start..].to_vec())
                 .unwrap_or_default();
             if !writes.is_empty() {
+                // The proposal counts as this batch's change for the plan
+                // gate, as an unreviewed write would: review commits it or
+                // reports the rejection.
+                if let Some(path) = &args_path {
+                    let display = ctx
+                        .resolve(path)
+                        .map(|resolved| display_path(&ctx.cwd, &resolved))
+                        .unwrap_or_else(|_| path.clone());
+                    if !batch_files.contains(&display) {
+                        batch_files.push(display);
+                    }
+                }
                 buffered.push(BufferedCall {
                     call: call.clone(),
                     args: evidence_args

@@ -3101,6 +3101,40 @@ async fn a_derived_plan_lists_one_batch_in_call_order() {
 }
 
 #[tokio::test]
+async fn reviewed_writes_in_one_batch_still_derive_the_plan() {
+    use totality::tools::hunk::HunkDecision;
+    let dir = tempfile::tempdir().unwrap();
+    let reviewer = scripted_reviewer(vec![HunkDecision::accept_all(3)]);
+    let harness = harness(
+        dir.path(),
+        vec![
+            parallel_tool_script(&[
+                ("write", json!({"path":"a.txt","content":"a"})),
+                ("write", json!({"path":"b.txt","content":"b"})),
+                ("write", json!({"path":"c.txt","content":"c"})),
+            ]),
+            text_script("done"),
+        ],
+        &["write", "todo"],
+    );
+    harness.core.set_reviewer(reviewer.clone());
+    let (outcome, _) = run(&harness, "make files").await;
+    assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
+    assert_eq!(
+        reviewer.requests.lock().unwrap().len(),
+        1,
+        "the batch was reviewed"
+    );
+    let states = todo_states(&harness.session);
+    assert!(
+        !states.is_empty(),
+        "captured proposals count for the plan gate"
+    );
+    let names: Vec<String> = task_pairs(&states[0]).into_iter().map(|t| t.0).collect();
+    assert_eq!(names, vec!["change a.txt", "change b.txt", "change c.txt"]);
+}
+
+#[tokio::test]
 async fn todo_plan_off_records_no_plan() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = base_config();
