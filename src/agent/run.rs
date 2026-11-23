@@ -2949,7 +2949,24 @@ async fn execute_batch(
             }
             crate::config::ReviewMode::Auto => {
                 let risk = mutation_calls.iter().find_map(|index| {
-                    let arguments = &calls[*index].arguments;
+                    // Judge the arguments the tool will run with: repair maps
+                    // aliases such as `write.text` or `edit.new_string` onto
+                    // `content` and `new`, so the scan reads the same text.
+                    let call = &calls[*index];
+                    let name = routed_tool_name(&call.name, &active);
+                    let repaired =
+                        core.tools
+                            .iter()
+                            .find(|tool| tool.name() == name)
+                            .and_then(|tool| {
+                                super::repair::repair(
+                                    &name,
+                                    &arguments_raw(&call.arguments),
+                                    &tool.schema(),
+                                )
+                                .ok()
+                            });
+                    let arguments = repaired.as_ref().unwrap_or(&call.arguments);
                     // A hash-anchored patch carries `path#snapshot`.
                     let raw = mutation_path(arguments)?;
                     let raw = raw.split('#').next().unwrap_or(raw);

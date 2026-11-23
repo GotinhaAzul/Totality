@@ -3807,6 +3807,48 @@ async fn auto_reviews_a_risky_single_file_edit_and_records_the_rule() {
 }
 
 #[tokio::test]
+async fn auto_scans_a_secret_passed_through_an_argument_alias() {
+    use totality::tools::hunk::HunkDecision;
+
+    let dir = tempfile::tempdir().unwrap();
+    let reviewer = scripted_reviewer(vec![HunkDecision::reject_all(1)]);
+    let harness = harness(
+        dir.path(),
+        vec![
+            // `text` is an accepted alias that repair maps onto `content`.
+            call_script(
+                "write_secret",
+                "write",
+                json!({"path": "src/keys.rs", "text": "const KEY: &str = \"AKIA1234567890ABCDEF\";\n"}),
+            ),
+            text_script("ok"),
+        ],
+        &["write"],
+    );
+    harness.core.set_reviewer(reviewer.clone());
+
+    let (outcome, _) = run(&harness, "add the key").await;
+    assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
+    assert_eq!(
+        reviewer.requests.lock().unwrap().len(),
+        1,
+        "the secret opens review"
+    );
+    assert!(
+        !dir.path().join("src/keys.rs").exists(),
+        "the rejected write never lands"
+    );
+    let session = harness.session.lock().unwrap();
+    let review = session
+        .latest_custom_on_path("hunk-review")
+        .expect("review entry");
+    match &review.kind {
+        EntryKind::Custom(custom) => assert_eq!(custom.payload["trigger"], "risk:secret"),
+        _ => panic!("wrong entry type"),
+    }
+}
+
+#[tokio::test]
 async fn auto_lands_a_safe_single_file_edit_without_review() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
