@@ -117,6 +117,9 @@ pub struct TurnFacts {
     pub mutations: usize,
     pub files: Vec<String>,
     pub todo_plan_present: bool,
+    /// The turn's latest plan was derived by the harness, not written by the
+    /// model (`source: "harness"`).
+    pub todo_plan_derived: bool,
     pub todo_all_done: bool,
     pub todo_final_done: bool,
     pub verify_configured: bool,
@@ -196,6 +199,9 @@ pub fn analyze_turn_since(
                         .get("tasks")
                         .and_then(|v| v.as_array())
                         .is_some_and(|tasks| !tasks.is_empty());
+                    facts.todo_plan_derived = facts.todo_plan_present
+                        && custom.payload.get("source").and_then(|v| v.as_str())
+                            == Some(DERIVED_PLAN_SOURCE);
                     if let Some(tasks) = custom.payload.get("tasks").and_then(|v| v.as_array()) {
                         let mut all_done = !tasks.is_empty();
                         for task in tasks {
@@ -354,38 +360,78 @@ pub fn settle(facts: &TurnFacts, progress: &mut RunProgress, tools: GateTools) -
     SettleDecision::Done
 }
 
-/// The todo edit gate: once a run has changed two distinct files, an edit to a
-/// third distinct file needs a plan. Returns a block result when the call must
-/// not run. Re-editing a file the run already changed is always allowed: the
-/// gate counts logical files, not edits.
+/// Whether a mutation of `target` makes this run's third distinct changed
+/// file with no plan. Re-editing a file the run already changed never counts:
+/// the gate counts logical files, not edits.
+pub fn plan_gate_fires(
+    tool: &str,
+    target: Option<&str>,
+    files: &[String],
+    plan_present: bool,
+) -> bool {
+    if !matches!(tool, "edit" | "write" | "patch") || plan_present {
+        return false;
+    }
+    if target.is_some_and(|target| files.iter().any(|file| file == target)) {
+        return false;
+    }
+    files.len() + usize::from(target.is_some()) >= 3
+}
+
+/// The todo edit gate in `require` mode: once a run has changed two distinct
+/// files, an edit to a third distinct file needs a plan. Returns a block
+/// result when the call must not run.
 pub fn todo_edit_gate(
     tool: &str,
     target: Option<&str>,
     files: &[String],
     plan_present: bool,
 ) -> Option<ToolResult> {
-    if !matches!(tool, "edit" | "write" | "patch") {
-        return None;
-    }
-    if plan_present {
-        return None;
-    }
-    let already_changed = target.is_some_and(|target| files.iter().any(|file| file == target));
-    // Re-editing a file the run already changed never needs a plan, even
-    // after the third file.
-    if already_changed {
+    if !plan_gate_fires(tool, target, files, plan_present) {
         return None;
     }
     let logical = files.len() + usize::from(target.is_some());
-    if logical < 3 {
-        return None;
-    }
     Some(ToolResult::err(
         "TODO_PLAN",
         format!(
             "this run has changed {logical} distinct files; a plan is now required. Call todo with {{\"action\":\"plan\",\"tasks\":[\"...\"]}} first, then retry this edit. Editing a file already changed does not need a new plan."
         ),
     ))
+}
+
+/// `source` of a `todo-state` entry the harness derived from session facts.
+pub const DERIVED_PLAN_SOURCE: &str = "harness";
+
+/// The line a mutation result carries when the harness derived the plan.
+pub const DERIVED_PLAN_NOTICE: &str = "[totality] plan derived from changed files; call todo action=\"plan\" to replace it with your own.";
+
+/// The plan the harness records instead of blocking (`[gates] todo_plan =
+/// "derive"`): one `change <file>` task per file the run already changed, in
+/// session order and completed; `change <target>` in progress; and `verify`
+/// pending when verification is configured. Every field comes from session
+/// facts, so the same session yields the same plan. A ledger of the work,
+/// not a forecast of it.
+pub fn derived_plan(
+    files: &[String],
+    target: Option<&str>,
+    verify: bool,
+) -> crate::session::CustomData {
+    let mut tasks: Vec<serde_json::Value> = files
+        .iter()
+        .filter(|file| Some(file.as_str()) != target)
+        .map(|file| serde_json::json!({"content": format!("change {file}"), "status": "completed"}))
+        .collect();
+    if let Some(target) = target {
+        tasks.push(
+            serde_json::json!({"content": format!("change {target}"), "status": "in_progress"}),
+        );
+    }
+    if verify {
+        tasks.push(serde_json::json!({"content": "verify", "status": "pending"}));
+    }
+    crate::session::CustomData::new("todo-state")
+        .with("tasks", tasks)
+        .with("source", DERIVED_PLAN_SOURCE)
 }
 
 /// One line for the result of a mutation that leaves the run one step from
@@ -403,6 +449,70 @@ mod tests {
     use super::*;
     use crate::config::BudgetConfig;
     use crate::session::*;
+
+    #[test]
+    fn a_derived_plan_is_a_deterministic_ledger_of_the_run() {
+        let files = vec!["a.rs".to_string(), "b.rs".to_string()];
+        let plan = derived_plan(&files, Some("c.rs"), true);
+        assert_eq!(plan.kind, "todo-state");
+        assert_eq!(plan.payload["source"], DERIVED_PLAN_SOURCE);
+        let tasks: Vec<(&str, &str)> = plan.payload["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                (
+                    t["content"].as_str().unwrap(),
+                    t["status"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            tasks,
+            vec![
+                ("change a.rs", "completed"),
+                ("change b.rs", "completed"),
+                ("change c.rs", "in_progress"),
+                ("verify", "pending"),
+            ]
+        );
+        // No verify task without verification; same input, same plan.
+        let without = derived_plan(&files, Some("c.rs"), false);
+        assert_eq!(without.payload["tasks"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            derived_plan(&files, Some("c.rs"), true).payload,
+            plan.payload
+        );
+    }
+
+    #[test]
+    fn turn_facts_mark_a_derived_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = session(dir.path());
+        session
+            .append(EntryKind::User(UserData {
+                attachments: Vec::new(),
+                content: "go".into(),
+            }))
+            .unwrap();
+        session
+            .append(EntryKind::Custom(derived_plan(
+                &["a.rs".into()],
+                Some("b.rs"),
+                false,
+            )))
+            .unwrap();
+        let facts = analyze_turn(&session, false);
+        assert!(facts.todo_plan_present && facts.todo_plan_derived);
+        session
+            .append(EntryKind::Custom(CustomData::new("todo-state").with(
+                "tasks",
+                serde_json::json!([{"content": "mine", "status": "pending"}]),
+            )))
+            .unwrap();
+        let facts = analyze_turn(&session, false);
+        assert!(facts.todo_plan_present && !facts.todo_plan_derived);
+    }
 
     #[test]
     fn verified_work_is_not_reopened_for_a_plan() {

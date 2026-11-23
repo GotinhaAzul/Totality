@@ -9,6 +9,15 @@ release may change defaults when the change is called out below.
 
 ### Added
 
+- `[gates] todo_plan = "derive" | "require" | "off"`. The default, `derive`,
+  replaces the `TODO_PLAN` block at a run's third distinct file with a plan the
+  harness records from session facts (`change <file>` per changed file, the
+  current target in progress, `verify` pending when configured), tagged
+  `source: "harness"`, and lets the edit run
+  ([#161](https://github.com/GotinhaAzul/Totality/issues/161)). A model
+  `todo plan` replaces it; `todo list` shows the source. `require` keeps the
+  old blocking gate.
+
 - `git` action `rewrite_history` removes paths from every branch and tag with
   guardrails in the action itself: clean-tree and repository-root checks, a
   backup bundle under `<data-dir>/rewrites/`, `git filter-repo` (or
