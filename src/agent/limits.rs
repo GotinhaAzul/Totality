@@ -1,11 +1,17 @@
-//! Run checkpoints, wall clock, and stall detection.
+//! Run checkpoints, wall clock, and the progress ledger.
+//!
+//! One [`ProgressLedger`] decides whether a run is still making progress.
+//! Every tool result is classified once: `changed` (a file changed or the
+//! workspace moved), `verified` (a verification passed), `learned` (a success
+//! whose output was not seen this turn), or `failed-new` (an error not seen
+//! this turn). Anything else is idle. `[budgets] idle_budget` idle calls
+//! within the last twice as many (since the last change or passing verify)
+//! is a stall: the first one pivots, the second ends the turn.
 //!
 //! Tool-call, model-call, and wall-clock limits are checkpoints, not hard
-//! stops. When one is reached and the run produced new information, a file
-//! change, or a passing verification recently, the allowance is renewed and
-//! the turn continues. Only a checkpoint with no recent progress — or the
-//! exact-repetition guards — ends the turn. This lets a real long task run as
-//! long as it keeps making progress without letting a looping model do so.
+//! stops: one renews when the ledger saw a change, a passing verify, or a new
+//! result since the last one (a new error alone does not renew), so a long
+//! task runs as long as it keeps making progress.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -24,13 +30,9 @@ pub struct RunLimits {
     pub max_model_calls: u32,
     /// Checkpoint interval, not a hard cap.
     pub max_wall: Duration,
-    pub stall_calls: u32,
-    /// Failing or repeated calls of one tool family allowed in a turn. Zero
-    /// disables the guard.
-    pub max_same_tool_family: u32,
-    /// Successful calls of one family that change nothing allowed in a turn.
-    /// Zero disables the guard.
-    pub max_same_tool_family_success: u32,
+    /// Idle calls in a row (no change, no passing verify, nothing new) that
+    /// make a stall.
+    pub idle_budget: u32,
     pub verify_attempts: u32,
 }
 
@@ -40,9 +42,7 @@ impl From<&BudgetConfig> for RunLimits {
             max_tool_calls: config.max_tool_calls.max(1),
             max_model_calls: config.max_model_calls.max(1),
             max_wall: Duration::from_secs(u64::from(config.max_wall_minutes.max(1)) * 60),
-            stall_calls: config.stall_calls.max(1),
-            max_same_tool_family: config.max_same_tool_family,
-            max_same_tool_family_success: config.max_same_tool_family_success,
+            idle_budget: config.idle_budget.max(1),
             verify_attempts: config.verify_attempts,
         }
     }
@@ -52,8 +52,6 @@ impl From<&BudgetConfig> for RunLimits {
 /// slowest recently measured call duration, so a slow engine or a long
 /// thinking model is never stopped for being slow.
 const WALL_CALLS: u32 = 6;
-/// The progress window covers at least this many model calls.
-const WINDOW_CALLS: u32 = 3;
 /// Model-call durations remembered for scaling.
 const RECENT_CALLS: usize = 5;
 
@@ -97,6 +95,21 @@ impl StopReason {
     }
 }
 
+/// What one tool result did for the run, as the ledger classifies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressEvent {
+    /// A file changed, or the workspace moved under an idle streak.
+    Changed,
+    /// A project verification passed.
+    Verified,
+    /// A success whose output was not seen this turn.
+    Learned,
+    /// An error whose message was not seen this turn: new information too.
+    FailedNew,
+    /// A repeat, a known error, or a success that told us nothing new.
+    Idle,
+}
+
 /// Result of asking a checkpoint whether the turn may continue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BudgetCheck {
@@ -124,16 +137,7 @@ pub struct RunProgress {
     epoch_started_at: Instant,
     /// How many times a productive checkpoint renewed the allowance.
     pub renewals: u32,
-    /// Cumulative tool-call index of the last result that changed a file, passed
-    /// a verification, or was new information from a read-only call: the
-    /// progress the stall tracker respects.
-    last_progress_call: Option<u32>,
-    last_progress_at: Option<Instant>,
-    /// Digest of each read-only result already seen. Exploration that keeps
-    /// returning the same bytes is not progress; a new page, file, or listing
-    /// is. Failed and mutating calls never count here.
-    seen_reads: HashSet<u64>,
-    pub stall: StallTracker,
+    pub ledger: ProgressLedger,
     pub settle_continuations: u32,
     pub verify_attempts: u32,
     pub review_nudged: bool,
@@ -165,9 +169,7 @@ pub struct RunProgress {
 
 impl RunProgress {
     pub fn new(limits: RunLimits) -> Self {
-        let stall_calls = limits.stall_calls;
-        let family_limit = limits.max_same_tool_family;
-        let success_limit = limits.max_same_tool_family_success;
+        let idle_budget = limits.idle_budget;
         let now = Instant::now();
         Self {
             limits,
@@ -178,10 +180,7 @@ impl RunProgress {
             epoch_model_calls: 0,
             epoch_started_at: now,
             renewals: 0,
-            last_progress_call: None,
-            last_progress_at: None,
-            seen_reads: HashSet::new(),
-            stall: StallTracker::new(stall_calls, family_limit, success_limit),
+            ledger: ProgressLedger::new(idle_budget),
             settle_continuations: 0,
             verify_attempts: 0,
             review_nudged: false,
@@ -225,16 +224,15 @@ impl RunProgress {
         if !model_hit && !wall_hit {
             return BudgetCheck::Ok;
         }
-        if model_hit {
-            if self.recent_call_progress() {
-                return self.renew(StopReason::ModelBudget);
-            }
-            return BudgetCheck::Exhausted(StopReason::ModelBudget);
-        }
-        if self.recent_time_progress() {
-            self.renew(StopReason::WallClock)
+        let reason = if model_hit {
+            StopReason::ModelBudget
         } else {
-            BudgetCheck::Exhausted(StopReason::WallClock)
+            StopReason::WallClock
+        };
+        if self.ledger.progressed_since_checkpoint() {
+            self.renew(reason)
+        } else {
+            BudgetCheck::Exhausted(reason)
         }
     }
 
@@ -265,7 +263,7 @@ impl RunProgress {
         if self.epoch_tool_calls.saturating_add(n) <= self.limits.max_tool_calls {
             return BudgetCheck::Ok;
         }
-        if self.recent_call_progress() {
+        if self.ledger.progressed_since_checkpoint() {
             self.renew(StopReason::ToolBudget)
         } else {
             BudgetCheck::Exhausted(StopReason::ToolBudget)
@@ -273,45 +271,33 @@ impl RunProgress {
     }
 
     /// Record a tool result. `outcome.result` is the content shown to the
-    /// model. Progress is the same fact the stall tracker counts: a file
-    /// change or a passing verification. A new result on its own does not
-    /// renew a checkpoint, so the budget cannot say "still making progress"
-    /// while the stall guard says the last calls changed nothing. `cwd` is the
-    /// workspace the call ran in.
-    pub fn record_tool_result(&mut self, cwd: &Path, outcome: ToolOutcome<'_>) {
+    /// model; `cwd` is the workspace the call ran in.
+    pub fn record_tool_result(&mut self, cwd: &Path, outcome: ToolOutcome<'_>) -> ProgressEvent {
         self.tool_calls += 1;
         self.epoch_tool_calls += 1;
-        self.stall.observe(cwd, outcome);
-        // Read-only exploration is not a loop: a new page, listing, or file is
-        // progress the stall tracker exempts. A new result from a call that
-        // does work is not, or the budget would renew while the family guard
-        // counts the same calls as idle successes.
-        let novel_read = outcome.read_only
-            && !outcome.is_error
-            && self.seen_reads.insert(result_digest(outcome.result));
-        if outcome.changed_file || outcome.verified_ok || novel_read {
-            self.last_progress_call = Some(self.tool_calls);
-            self.last_progress_at = Some(Instant::now());
-        }
+        self.ledger.observe(cwd, outcome)
+    }
+
+    /// A certain loop (the loop guard's exact repeat or cycle): the idle
+    /// budget is spent at once, with `reason` as the stop message.
+    pub fn record_loop(&mut self, reason: impl Into<String>) {
+        self.ledger.record_loop(reason.into());
     }
 
     pub fn stalled(&self) -> bool {
-        self.stall.stalled()
+        self.ledger.stalled()
     }
 
-    /// Why the turn is being stopped as `stalled`, naming the repeating family
-    /// when that guard is the one that fired.
+    /// Why the turn is being stopped as `stalled`.
     pub fn stall_message(&self) -> String {
-        self.stall
-            .family_reason()
-            .unwrap_or_else(|| StopReason::Stalled.message().to_string())
+        self.ledger.stall_message()
     }
 
-    /// Re-check a recorded family trip once a batch is over. A call later in
-    /// the same batch may have changed the workspace (a `sed -i`, a script
-    /// writing a file); the run was making progress, so it is not a stall.
+    /// Re-check a stall once a batch is over. A call later in the same batch
+    /// may have changed the workspace (a `sed -i`, a script writing a file);
+    /// the run was making progress, so it is not a stall.
     pub fn recheck_workspace(&mut self, cwd: &Path) {
-        self.stall.recheck(cwd);
+        self.ledger.recheck(cwd);
     }
 
     /// A successful reply breaks a context-error episode: the next compaction
@@ -328,9 +314,8 @@ impl RunProgress {
 
     /// Message for a checkpoint that ended the turn.
     pub fn checkpoint_message(&self, reason: StopReason) -> String {
-        let window = self.limits.stall_calls;
         let no_progress =
-            format!("no file change or passing verification in the last {window} call(s)");
+            "no file change, passing verification, or new result since the last checkpoint";
         match reason {
             StopReason::ToolBudget => format!(
                 "tool-call checkpoint: {} calls in this allowance, {no_progress}. The run is repeating without progress; summarize the last known state or start a new turn with a different approach.",
@@ -366,12 +351,10 @@ impl RunProgress {
             return false;
         }
         self.pivot_used = true;
-        self.stall.reset();
+        self.ledger.reset();
         self.epoch_tool_calls = 0;
         self.epoch_model_calls = 0;
         self.epoch_started_at = Instant::now();
-        self.last_progress_call = None;
-        self.last_progress_at = None;
         true
     }
 
@@ -382,10 +365,7 @@ impl RunProgress {
                 "recent calls keep repeating without changing a file or passing a verification"
                     .to_string()
             }
-            _ => format!(
-                "the last {} call(s) changed no file and passed no verification",
-                self.limits.stall_calls
-            ),
+            _ => "the calls since the last checkpoint changed no file, passed no verification, and returned nothing new".to_string(),
         };
         format!(
             "[totality] {}: {why}; the current approach is not working. Do not repeat it or try small variations of it, and do not search for a ready-made tool that may not exist. In one sentence, say why it failed, then switch to a different method: for example, write and run a small script with what is installed, use a different tool, or read the relevant documentation once. You have one more allowance; if it also makes no progress, the turn ends.",
@@ -396,29 +376,12 @@ impl RunProgress {
     /// User-facing notice when a productive checkpoint renews the allowance.
     pub fn renewal_message(&self, trigger: StopReason) -> String {
         format!(
-            "budget checkpoint renewed ({}): {} tool calls, {} model calls, {} min used; files are still changing or a verification is passing, so the turn continues.",
+            "budget checkpoint renewed ({}): {} tool calls, {} model calls, {} min used; the run is still changing files, passing verification, or learning something new, so the turn continues.",
             trigger.code(),
             self.tool_calls,
             self.model_calls,
             self.elapsed().as_secs() / 60
         )
-    }
-
-    fn recent_call_progress(&self) -> bool {
-        self.last_progress_call
-            .is_some_and(|at| self.tool_calls.saturating_sub(at) < self.limits.stall_calls)
-    }
-
-    fn recent_time_progress(&self) -> bool {
-        let calls = self
-            .slowest_call()
-            .map(|call| call * WINDOW_CALLS)
-            .unwrap_or_default();
-        let window = (self.effective_wall() / 2)
-            .max(calls)
-            .max(Duration::from_secs(60));
-        self.last_progress_at
-            .is_some_and(|at| at.elapsed() < window)
     }
 
     fn renew(&mut self, trigger: StopReason) -> BudgetCheck {
@@ -427,8 +390,7 @@ impl RunProgress {
         self.epoch_started_at = Instant::now();
         self.renewals += 1;
         // A renewal must be earned again by new work in the next allowance.
-        self.last_progress_call = None;
-        self.last_progress_at = None;
+        self.ledger.start_checkpoint();
         BudgetCheck::Renewed(trigger)
     }
 }
@@ -439,25 +401,20 @@ fn result_digest(result: &str) -> u64 {
     hasher.finish()
 }
 
-/// One tool result as the stall guard sees it.
+/// One tool result as the progress ledger sees it.
 #[derive(Debug, Clone, Copy)]
 pub struct ToolOutcome<'a> {
-    /// The call and its result, for the consecutive-identical strike counter.
-    pub fingerprint: &'a str,
     /// Canonical family of the call: `bash` by program and operation, other
-    /// tools by name and key arguments.
+    /// tools by name and key arguments. Names the idle family in a stop
+    /// message and keys known errors.
     pub family: &'a str,
-    /// The family plus the arguments that make this exact call distinct.
-    pub signature: &'a str,
+    /// Raw call arguments, so an error echoing them back is not new.
+    pub arguments: &'a str,
     /// Result content shown to the model.
     pub result: &'a str,
     pub is_error: bool,
     pub changed_file: bool,
     pub verified_ok: bool,
-    /// The call only inspects the workspace, the repository, or the network:
-    /// a read-only tool, a read-only action of a mixed tool, or a `bash`
-    /// command with no write in it. Never a repeat or an idle success.
-    pub read_only: bool,
 }
 
 /// Tools whose every call only reads. The list is the registry's read-only
@@ -528,359 +485,270 @@ pub fn call_read_only(name: &str, arguments: &str) -> bool {
     }
 }
 
-/// Detects a turn that repeats itself. One counter watches consecutive
-/// identical fingerprints; three cumulative counters watch a tool family
-/// across the whole turn: failing calls, repeated calls (successful or not),
-/// and successful calls that changed nothing and passed no verification.
+/// The single progress decision for a turn.
 ///
-/// Only a file change, a passing verification, or a workspace that changed
-/// since the counter started clears a family counter. A different call in
-/// between, or a success of the same family, does not. Read-only calls are
-/// watched by the consecutive-identical counter only.
+/// Each result is one [`ProgressEvent`]. Strong progress (`changed`,
+/// `verified`) clears the window. Weak progress (`learned`, `failed-new`)
+/// adds a productive call to it, and an idle call adds an idle one. The run
+/// is stalled when `budget` of the last `2 × budget` calls since the last
+/// strong progress were idle: a plain idle streak stalls at exactly `budget`,
+/// and a model that re-runs one command between new probes stalls too,
+/// while exploration that keeps learning never does.
+///
+/// At the stall decision the workspace is read once and compared with the
+/// reading taken when the window's first idle call came in: a `sed -i`
+/// through `bash` changes files without reporting it, and that is progress.
+/// The loop guard's certain repeats spend the budget at once
+/// ([`ProgressLedger::record_loop`]).
 #[derive(Debug)]
-pub struct StallTracker {
-    needed: u32,
-    strikes: u32,
-    last: Option<String>,
-    /// Failing and repeated calls per family. Zero disables.
-    family_limit: u32,
-    /// Successful calls that changed nothing per family. Zero disables.
-    success_limit: u32,
-    failures: HashMap<String, Counter>,
-    repeats: HashMap<String, Counter>,
-    idle_successes: HashMap<String, Counter>,
-    /// Identical call arguments *and* identical result, even when other calls
-    /// interleave. A re-fetch at the same offset or a no-op edit repeated
-    /// forever is a loop the consecutive counter cannot see.
-    duplicates: HashMap<String, Counter>,
-    trip: Option<Trip>,
-    /// Workspace identity, read lazily and reused by every counter.
+pub struct ProgressLedger {
+    budget: u32,
+    /// Idle flags of the recent calls since the last strong progress, at
+    /// most `2 × budget`.
+    window: VecDeque<bool>,
+    /// Digests of successful outputs seen this turn (header line excluded).
+    seen_results: HashSet<u64>,
+    /// Digests of (family, error) pairs seen this turn, with the call's own
+    /// arguments removed from the error text.
+    seen_errors: HashSet<u64>,
+    /// Idle calls per family in the window, for the stop message.
+    idle_families: HashMap<String, u32>,
+    /// The loop guard's reason, when a certain loop spent the budget.
+    loop_reason: Option<String>,
+    /// Workspace identity when the window's first idle call came in.
+    baseline: Option<String>,
+    /// Whether the stall decision already took its fresh reading.
+    checked: bool,
+    /// A change, a passing verify, or a new result since the last
+    /// checkpoint renewal (or pivot). A new error does not count.
+    since_checkpoint: bool,
     workspace: WorkspaceMemo,
-    /// How the workspace is identified. A field so a test can count reads
-    /// instead of timing them.
+    /// How the workspace is identified. A field so a test can count reads.
     fingerprint: Fingerprint,
 }
 
-impl StallTracker {
-    pub fn new(needed: u32, family_limit: u32, success_limit: u32) -> Self {
+impl ProgressLedger {
+    pub fn new(budget: u32) -> Self {
         Self {
-            needed,
-            strikes: 0,
-            last: None,
-            family_limit,
-            success_limit,
-            failures: HashMap::new(),
-            repeats: HashMap::new(),
-            idle_successes: HashMap::new(),
-            duplicates: HashMap::new(),
-            trip: None,
+            budget: budget.max(1),
+            window: VecDeque::new(),
+            seen_results: HashSet::new(),
+            seen_errors: HashSet::new(),
+            idle_families: HashMap::new(),
+            loop_reason: None,
+            baseline: None,
+            checked: false,
+            since_checkpoint: false,
             workspace: WorkspaceMemo::default(),
             fingerprint: workspace_state,
         }
     }
 
-    pub fn observe(&mut self, cwd: &Path, outcome: ToolOutcome<'_>) {
+    pub fn observe(&mut self, cwd: &Path, outcome: ToolOutcome<'_>) -> ProgressEvent {
         self.workspace.begin_call();
-        if outcome.changed_file || outcome.verified_ok {
-            self.strikes = 0;
-            self.last = Some(outcome.fingerprint.to_string());
-            // Real progress clears every counter and the memo: the workspace
-            // is read again when the next counter starts.
-            self.clear();
-            self.workspace.invalidate();
-            return;
-        }
-        if self.last.as_deref() == Some(outcome.fingerprint) {
-            self.strikes += 1;
+        let event = if outcome.changed_file {
+            ProgressEvent::Changed
+        } else if outcome.verified_ok {
+            ProgressEvent::Verified
+        } else if outcome.is_error {
+            let key = error_digest(outcome.family, outcome.arguments, outcome.result);
+            if self.seen_errors.insert(key) {
+                ProgressEvent::FailedNew
+            } else {
+                ProgressEvent::Idle
+            }
+        } else if self
+            .seen_results
+            .insert(result_digest(&news(outcome.result)))
+        {
+            ProgressEvent::Learned
         } else {
-            self.strikes = 1;
-            self.last = Some(outcome.fingerprint.to_string());
-        }
-
-        // A counter that already tripped ended the guard's work for the turn.
-        // Further calls are not counted and take no fingerprint; only a
-        // reported file change (above) or the end-of-batch re-check clears it.
-        if self.trip.is_some() {
-            return;
-        }
-        // The same arguments producing the same result is a loop even when
-        // other calls interleave (A, B, A, B, …), which the consecutive
-        // counter cannot see. `bg logs` is exempt: a slow build can print the
-        // same line for a while and is still advancing.
-        // A failed call repeated with the same error is a loop whatever the
-        // tool; a re-fetch at the same offset is the documented case for a
-        // read. Ordinary reads and `bg logs` polls may legitimately return the
-        // same bytes while the turn is making progress elsewhere.
-        let duplicate_watch =
-            outcome.is_error || outcome.family == "fetch" || outcome.family.starts_with("fetch ");
-        if duplicate_watch {
-            let key = format!(
-                "{}\u{1}{:016x}",
-                outcome.signature,
-                result_digest(outcome.result)
-            );
-            if let Some(count) = self.bump(cwd, Counted::Duplicate, &key) {
-                self.set_trip_with_detail(
-                    TripKind::Duplicate,
-                    outcome.family,
-                    count,
-                    Some(fingerprint_detail(outcome.result)),
-                );
-            }
-        }
-        if outcome.is_error {
-            if let Some(count) = self.bump(cwd, Counted::Failure, outcome.family) {
-                self.set_trip(TripKind::Failed, outcome.family, count);
-            }
-            return;
-        }
-        // Reading a file, polling a job, or fetching a URL is inspection, not
-        // an attempt to do the work: a `bg logs` poll that shows a build
-        // advancing is new information every time, and a chain of distinct
-        // `curl`, `git show`, or `gh pr view` calls is exploration. Only the
-        // consecutive-identical counter watches read loops, and it needs the
-        // same result twice. Failing reads still count above: a broken read
-        // retried forever is a loop.
-        if outcome.read_only {
-            return;
-        }
-        if let Some(count) = self.bump(cwd, Counted::Repeat, outcome.signature) {
-            self.set_trip(TripKind::Repeated, outcome.signature, count);
-        }
-        let coarse = coarse_family(outcome.family);
-        if let Some(count) = self.bump(cwd, Counted::Success, &coarse) {
-            self.set_trip(TripKind::Unproductive, &coarse, count);
-        }
-    }
-
-    fn bump(&mut self, cwd: &Path, counted: Counted, key: &str) -> Option<u32> {
-        let limit = counted.limit(self.family_limit, self.success_limit);
-        if limit == 0 {
-            return None;
-        }
-        let counters = match counted {
-            Counted::Failure => &mut self.failures,
-            Counted::Repeat => &mut self.repeats,
-            Counted::Success => &mut self.idle_successes,
-            Counted::Duplicate => &mut self.duplicates,
+            ProgressEvent::Idle
         };
-        bump(
-            counters,
-            key,
-            limit,
-            &mut self.workspace,
-            cwd,
-            self.fingerprint,
-        )
-    }
-
-    fn set_trip(&mut self, kind: TripKind, family: &str, count: u32) {
-        self.set_trip_with_detail(kind, family, count, None);
-    }
-
-    fn set_trip_with_detail(
-        &mut self,
-        kind: TripKind,
-        family: &str,
-        count: u32,
-        detail: Option<String>,
-    ) {
-        if self.trip.is_some() {
-            return;
-        }
-        let workspace = self.workspace.state().map(str::to_string);
-        self.trip = Some(Trip {
-            kind,
-            family: family.to_string(),
-            count,
-            detail,
-            workspace,
-        });
-    }
-
-    /// Forget every counter and trip: after a pivot, the next approach is
-    /// judged on its own calls.
-    pub fn reset(&mut self) {
-        self.clear();
-        self.strikes = 0;
-        self.last = None;
-    }
-
-    fn clear(&mut self) {
-        self.failures.clear();
-        self.repeats.clear();
-        self.idle_successes.clear();
-        self.duplicates.clear();
-        self.trip = None;
-    }
-
-    /// Re-check a recorded trip once its batch is over: a call in the same
-    /// batch may have changed the workspace, which makes the repetition real
-    /// work rather than a loop.
-    pub fn recheck(&mut self, cwd: &Path) {
-        let Some(trip) = self.trip.take() else {
-            return;
-        };
-        self.workspace.begin_call();
-        let now = self.workspace.fresh(cwd, self.fingerprint);
-        let changed = matches!(
-            (trip.workspace.as_deref(), now.as_deref()),
-            (Some(before), Some(after)) if before != after
-        );
-        if !changed {
-            self.trip = Some(trip);
-            return;
-        }
-        self.failures.clear();
-        self.repeats.clear();
-        self.idle_successes.clear();
-        self.duplicates.clear();
-    }
-
-    pub fn stalled(&self) -> bool {
-        self.strikes >= self.needed || self.trip.is_some()
-    }
-
-    pub fn strikes(&self) -> u32 {
-        self.strikes
-    }
-
-    /// Stop message for the family guard, once it has fired.
-    pub fn family_reason(&self) -> Option<String> {
-        let trip = self.trip.as_ref()?;
-        Some(match trip.kind {
-            TripKind::Repeated => format!(
-                "the same call was repeated {} times this turn without changing a file or passing a verification ({}); stop repeating it and report the last known state, or change approach in a new turn",
-                trip.count, trip.family
-            ),
-            TripKind::Failed => format!(
-                "the same tool family ({}) ran {} failing calls this turn without a file change or a passing verification; stop repeating it and report the last known state, or change approach in a new turn",
-                trip.family, trip.count
-            ),
-            TripKind::Unproductive => format!(
-                "{} successful calls of {} changed no file and passed no verification this turn; stop repeating it and report the last known state, or change approach in a new turn",
-                trip.count, trip.family
-            ),
-            TripKind::Duplicate => {
-                let detail = trip
-                    .detail
-                    .as_deref()
-                    .map(|detail| format!(" The result was: {detail}"))
-                    .unwrap_or_default();
-                format!(
-                    "the same {} call returned byte-identical output {} times this turn; you already have that result.{detail} Do not repeat it: use the artifact or the lines you already have, or change approach in a new turn",
-                    trip.family, trip.count
-                )
+        match event {
+            ProgressEvent::Changed | ProgressEvent::Verified => {
+                self.workspace.invalidate();
+                self.clear_window();
+                self.since_checkpoint = true;
             }
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum TripKind {
-    Repeated,
-    Failed,
-    Unproductive,
-    Duplicate,
-}
-
-#[derive(Debug)]
-struct Trip {
-    kind: TripKind,
-    family: String,
-    count: u32,
-    /// A short excerpt of the repeated result, so the stop message can quote
-    /// the error or the content that came back.
-    detail: Option<String>,
-    /// Workspace state when the trip fired. If the batch that follows changed
-    /// it, the turn is not stalled.
-    workspace: Option<String>,
-}
-
-/// A cumulative count for one key, plus the workspace state when the count
-/// started so real work in between can clear it.
-#[derive(Debug, Default)]
-struct Counter {
-    count: u32,
-    baseline: Option<String>,
-}
-
-/// Which counter a call feeds.
-#[derive(Debug, Clone, Copy)]
-enum Counted {
-    Failure,
-    Repeat,
-    Success,
-    Duplicate,
-}
-
-impl Counted {
-    fn limit(self, family_limit: u32, success_limit: u32) -> u32 {
-        match self {
-            Counted::Failure | Counted::Repeat => family_limit,
-            Counted::Success => success_limit,
-            // Three identical (arguments, result) pairs in one turn is a
-            // loop; the third is where the guard speaks. Zero disables it
-            // with the family guard.
-            Counted::Duplicate => {
-                if family_limit == 0 {
-                    0
-                } else {
-                    3
+            ProgressEvent::Learned => {
+                self.push(false, None);
+                self.since_checkpoint = true;
+            }
+            // A new error keeps the idle window open (it is information), but
+            // it does not buy another checkpoint allowance: a run that only
+            // finds new ways to fail is what the safety net is for.
+            ProgressEvent::FailedNew => self.push(false, None),
+            ProgressEvent::Idle => {
+                if self.idle() == 0 {
+                    self.baseline = self.workspace.baseline(cwd, self.fingerprint);
+                }
+                self.push(true, Some(coarse_family(outcome.family)));
+                if self.stalled() && !self.checked && self.loop_reason.is_none() {
+                    self.checked = true;
+                    if self.workspace_moved(cwd) {
+                        self.clear_window();
+                        self.since_checkpoint = true;
+                        return ProgressEvent::Changed;
+                    }
                 }
             }
         }
+        event
+    }
+
+    fn push(&mut self, idle: bool, family: Option<String>) {
+        self.window.push_back(idle);
+        if let Some(family) = family {
+            *self.idle_families.entry(family).or_default() += 1;
+        }
+        let capacity = (self.budget as usize) * 2;
+        while self.window.len() > capacity {
+            self.window.pop_front();
+        }
+    }
+
+    fn clear_window(&mut self) {
+        self.window.clear();
+        self.idle_families.clear();
+        self.baseline = None;
+        self.checked = false;
+    }
+
+    fn workspace_moved(&mut self, cwd: &Path) -> bool {
+        let now = self.workspace.fresh(cwd, self.fingerprint);
+        matches!(
+            (self.baseline.as_deref(), now.as_deref()),
+            (Some(before), Some(after)) if before != after
+        )
+    }
+
+    /// A certain loop spends the idle budget at once.
+    pub fn record_loop(&mut self, reason: String) {
+        self.loop_reason.get_or_insert(reason);
+    }
+
+    /// Idle calls in the window.
+    pub fn idle(&self) -> u32 {
+        self.window.iter().filter(|idle| **idle).count() as u32
+    }
+
+    pub fn stalled(&self) -> bool {
+        self.loop_reason.is_some() || self.idle() >= self.budget
+    }
+
+    pub fn progressed_since_checkpoint(&self) -> bool {
+        self.since_checkpoint
+    }
+
+    pub fn start_checkpoint(&mut self) {
+        self.since_checkpoint = false;
+    }
+
+    /// After a pivot the next approach is judged on its own calls. Results
+    /// already seen stay seen: repeating them is still idle.
+    pub fn reset(&mut self) {
+        self.clear_window();
+        self.loop_reason = None;
+        self.since_checkpoint = false;
+    }
+
+    /// End of a batch: a later call in it may have moved the workspace.
+    pub fn recheck(&mut self, cwd: &Path) {
+        if !self.stalled() || self.loop_reason.is_some() {
+            return;
+        }
+        self.workspace.begin_call();
+        if self.workspace_moved(cwd) {
+            self.clear_window();
+            self.since_checkpoint = true;
+        }
+    }
+
+    pub fn stall_message(&self) -> String {
+        if let Some(reason) = &self.loop_reason {
+            return reason.clone();
+        }
+        let family = self
+            .idle_families
+            .iter()
+            .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+            .map(|(family, count)| format!(" ({count} of them {family})"))
+            .unwrap_or_default();
+        format!(
+            "{} of the last {} calls{family} changed no file, passed no verification, and returned nothing new; stop repeating them and report the last known state, or change approach in a new turn",
+            self.idle(),
+            self.window.len()
+        )
     }
 }
 
-/// A one-line excerpt of a repeated result for the stop message.
-fn fingerprint_detail(result: &str) -> String {
-    let flat = result.split_whitespace().collect::<Vec<_>>().join(" ");
-    crate::text::clip(&flat, 220)
+/// The part of a result that is news: the `[tool] name - args` header line
+/// dropped, so different arguments with the same answer tell us nothing new,
+/// and session artifact ids (`out-17`) blanked, since a capped preview names a
+/// fresh one every time. Other digits stay: a line number, a revision, or a
+/// count is often the answer.
+fn news(result: &str) -> String {
+    let body = match result.split_once('\n') {
+        Some((first, rest)) if first.starts_with("[tool] ") => rest,
+        _ if result.starts_with("[tool] ") => "",
+        _ => result,
+    };
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(at) = rest.find("out-") {
+        let after = &rest[at + 4..];
+        let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+        let boundary = rest[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !ch.is_alphanumeric() && ch != '-' && ch != '_');
+        if digits > 0 && boundary {
+            out.push_str(&rest[..at]);
+            out.push_str("out-#");
+            rest = &after[digits..];
+        } else {
+            out.push_str(&rest[..at + 4]);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A failure keyed by coarse family and message, with the call's own argument
+/// words removed: `cat missing-3.txt` and `cat missing-4.txt` fail with the
+/// same error once the echoed path is set aside.
+fn error_digest(family: &str, arguments: &str, result: &str) -> u64 {
+    let trim = |word: &str| {
+        word.trim_matches(|ch: char| !ch.is_alphanumeric() && !matches!(ch, '.' | '_' | '-' | '/'))
+            .trim_end_matches('.')
+            .to_string()
+    };
+    let args: HashSet<String> = arguments
+        .split(|ch: char| {
+            ch.is_whitespace() || matches!(ch, '"' | '\'' | ',' | '{' | '}' | '[' | ']' | ':' | '=')
+        })
+        .map(trim)
+        .filter(|word| word.len() >= 3)
+        .collect();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // The coarse family: a `read` family names its path, and a path the
+    // error echoes is exactly what must not make it new.
+    coarse_family(family).hash(&mut hasher);
+    for word in news(result).split_whitespace() {
+        let core = trim(word);
+        if core.len() >= 3 && args.contains(&core) {
+            continue;
+        }
+        word.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// How the workspace is identified. A function pointer rather than a closure
 /// so a test can replace it with a counter.
 type Fingerprint = fn(&Path) -> Option<String>;
-
-/// Count one call for `key`. Returns the count once it reaches `limit`, unless
-/// the workspace changed since the counter started: then the calls did real
-/// work and the counter restarts instead of stopping the turn.
-fn bump(
-    counters: &mut HashMap<String, Counter>,
-    key: &str,
-    limit: u32,
-    workspace: &mut WorkspaceMemo,
-    cwd: &Path,
-    fingerprint: Fingerprint,
-) -> Option<u32> {
-    if limit == 0 {
-        return None;
-    }
-    let counter = counters.entry(key.to_string()).or_default();
-    if counter.count == 0 {
-        counter.baseline = workspace.baseline(cwd, fingerprint);
-    }
-    counter.count += 1;
-    if counter.count < limit {
-        return None;
-    }
-    let changed = match (
-        counter.baseline.as_deref(),
-        workspace.fresh(cwd, fingerprint).as_deref(),
-    ) {
-        (Some(before), Some(now)) => before != now,
-        // Without a readable workspace the guard keeps its stop: the call did
-        // not report a file change either.
-        _ => false,
-    };
-    if !changed {
-        return Some(counter.count);
-    }
-    counter.count = 0;
-    counter.baseline = None;
-    None
-}
 
 /// The workspace identity, read lazily and memoized across calls.
 ///
@@ -927,10 +795,6 @@ impl WorkspaceMemo {
         self.cwd = Some(cwd.to_path_buf());
         self.valid = true;
         self.fresh_taken = true;
-    }
-
-    fn state(&self) -> Option<&str> {
-        self.state.as_deref()
     }
 
     fn invalidate(&mut self) {
@@ -1025,26 +889,6 @@ pub fn tool_family(name: &str, arguments: &str) -> String {
         name.to_string()
     } else {
         format!("{name} {args}")
-    }
-}
-
-/// The family plus the arguments that make one call distinct, so a repeat can
-/// be told from a near-identical retry. Here-doc bodies, temporary paths, and
-/// bare numbers are hidden for `bash`; other tools keep their arguments, so
-/// two writes with different content are two calls.
-pub fn tool_signature(name: &str, arguments: &str) -> String {
-    let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
-    let family = tool_family(name, arguments);
-    let detail = if name == "bash" {
-        let command = args.get("command").and_then(Value::as_str).unwrap_or("");
-        normalize_text(&strip_heredocs(command))
-    } else {
-        canonical_args(&args, true)
-    };
-    if detail.is_empty() {
-        family
-    } else {
-        format!("{family} :: {detail}")
     }
 }
 
@@ -1341,42 +1185,6 @@ fn collapse(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Collapse whitespace and hide temporary-directory names and bare numbers,
-/// which change between retries even when the operation is the same. Used for
-/// bash commands only: a file path in another tool's arguments is that tool's
-/// target, not noise.
-fn normalize_text(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for word in text.split_whitespace() {
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(&normalize_word(word));
-    }
-    out
-}
-
-fn normalize_word(word: &str) -> String {
-    if !word.is_empty() && word.chars().all(|ch| ch.is_ascii_digit()) {
-        return "<n>".to_string();
-    }
-    normalize_temp_path(word)
-}
-
-/// Temporary directories whose names change on every call.
-const TEMP_ROOTS: &[&str] = &["/tmp/", "/var/tmp/", "/private/tmp/"];
-
-fn normalize_temp_path(word: &str) -> String {
-    for root in TEMP_ROOTS {
-        if let Some(rest) = word.strip_prefix(root)
-            && let Some((_, tail)) = rest.split_once('/')
-        {
-            return format!("<tmp>/{tail}");
-        }
-    }
-    word.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1386,19 +1194,8 @@ mod tests {
             max_tool_calls: 10,
             max_model_calls: 4,
             max_wall: Duration::from_secs(600),
-            stall_calls: 3,
-            max_same_tool_family: 8,
-            max_same_tool_family_success: 24,
+            idle_budget: 3,
             verify_attempts: 2,
-        }
-    }
-
-    fn disabled() -> RunLimits {
-        RunLimits {
-            stall_calls: 1_000,
-            max_same_tool_family: 0,
-            max_same_tool_family_success: 0,
-            ..limits()
         }
     }
 
@@ -1434,20 +1231,6 @@ mod tests {
     }
 
     #[test]
-    fn one_slow_call_after_progress_is_still_recent_progress() {
-        let mut progress = RunProgress::new(RunLimits {
-            max_wall: Duration::from_secs(60),
-            ..limits()
-        });
-        progress.record_call_duration(Duration::from_secs(100));
-        // Progress two slow calls ago is within the window (3 calls = 300s).
-        progress.last_progress_at = Some(ago(Duration::from_secs(200)));
-        assert!(progress.recent_time_progress());
-        progress.last_progress_at = Some(ago(Duration::from_secs(400)));
-        assert!(!progress.recent_time_progress());
-    }
-
-    #[test]
     fn only_the_last_few_calls_set_the_pace() {
         let mut progress = RunProgress::new(RunLimits {
             max_wall: Duration::from_secs(60),
@@ -1465,104 +1248,386 @@ mod tests {
         tempfile::tempdir().unwrap()
     }
 
-    /// Record a call whose family and signature are hand-built. Read-only
-    /// classification is a property of the call, not of the family string, so
-    /// the read-only cases below go through [`call`] instead.
-    #[allow(clippy::too_many_arguments)]
-    fn record(
-        progress: &mut RunProgress,
-        cwd: &Path,
-        family: &str,
-        signature: &str,
-        result: &str,
-        is_error: bool,
-        changed: bool,
-        verified: bool,
-    ) {
-        record_reading(
-            progress, cwd, family, signature, result, is_error, changed, verified, false,
-        );
+    fn outcome<'a>(family: &'a str, result: &'a str) -> ToolOutcome<'a> {
+        ToolOutcome {
+            family,
+            arguments: "",
+            result,
+            is_error: false,
+            changed_file: false,
+            verified_ok: false,
+        }
     }
 
-    /// Record a real call: the family, signature, and read-only flag come from
-    /// the same functions the agent loop uses.
-    fn call(
-        progress: &mut RunProgress,
-        cwd: &Path,
-        name: &str,
-        arguments: &serde_json::Value,
-        result: &str,
-        is_error: bool,
-        changed: bool,
-    ) {
-        let raw = arguments.to_string();
-        let family = tool_family(name, &raw);
-        let signature = tool_signature(name, &raw);
-        let read_only = call_read_only(name, &raw);
-        record_reading(
-            progress, cwd, &family, &signature, result, is_error, changed, false, read_only,
-        );
+    fn ok(progress: &mut RunProgress, cwd: &Path, family: &str, result: &str) -> ProgressEvent {
+        progress.record_tool_result(cwd, outcome(family, result))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn record_reading(
-        progress: &mut RunProgress,
-        cwd: &Path,
-        family: &str,
-        signature: &str,
-        result: &str,
-        is_error: bool,
-        changed: bool,
-        verified: bool,
-        read_only: bool,
-    ) {
-        let fingerprint = format!("{signature} | {result}");
+    fn fail(progress: &mut RunProgress, cwd: &Path, family: &str, result: &str) -> ProgressEvent {
         progress.record_tool_result(
             cwd,
             ToolOutcome {
-                fingerprint: &fingerprint,
-                family,
-                signature,
-                result,
-                is_error,
-                changed_file: changed,
-                verified_ok: verified,
-                read_only,
+                is_error: true,
+                ..outcome(family, result)
             },
-        );
+        )
     }
 
-    fn args(command: &str) -> String {
-        serde_json::json!({"command": command}).to_string()
+    fn changed(progress: &mut RunProgress, cwd: &Path) -> ProgressEvent {
+        progress.record_tool_result(
+            cwd,
+            ToolOutcome {
+                changed_file: true,
+                ..outcome("write", "[tool] write - a.rs\nwrote a.rs")
+            },
+        )
     }
 
     #[test]
-    fn productive_model_checkpoint_renews() {
+    fn each_result_is_one_progress_event() {
         let dir = empty_workspace();
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(limits());
+        assert_eq!(changed(&mut progress, cwd), ProgressEvent::Changed);
+        let verified = progress.record_tool_result(
+            cwd,
+            ToolOutcome {
+                verified_ok: true,
+                ..outcome("verify", "passed")
+            },
+        );
+        assert_eq!(verified, ProgressEvent::Verified);
+        assert_eq!(
+            ok(&mut progress, cwd, "read", "fn a()"),
+            ProgressEvent::Learned
+        );
+        assert_eq!(
+            ok(&mut progress, cwd, "read", "fn a()"),
+            ProgressEvent::Idle
+        );
+        assert_eq!(
+            fail(&mut progress, cwd, "bash cargo", "E0425"),
+            ProgressEvent::FailedNew
+        );
+        assert_eq!(
+            fail(&mut progress, cwd, "bash cargo", "E0425"),
+            ProgressEvent::Idle
+        );
+        // The same message from another family is new information.
+        assert_eq!(
+            fail(&mut progress, cwd, "bash rustc", "E0425"),
+            ProgressEvent::FailedNew
+        );
+    }
+
+    #[test]
+    fn the_header_line_is_not_news() {
+        let dir = empty_workspace();
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(limits());
+        assert_eq!(
+            ok(&mut progress, cwd, "grep", "[tool] grep - foo\nno matches"),
+            ProgressEvent::Learned
+        );
+        // Different arguments, the same answer: nothing new was learned.
+        assert_eq!(
+            ok(&mut progress, cwd, "grep", "[tool] grep - bar\nno matches"),
+            ProgressEvent::Idle
+        );
+        assert_eq!(
+            ok(&mut progress, cwd, "read", "[tool] read - a.rs\nline 1"),
+            ProgressEvent::Learned
+        );
+        assert_eq!(
+            ok(&mut progress, cwd, "read", "[tool] read - b.rs\nline 2"),
+            ProgressEvent::Learned,
+            "a number is often the answer"
+        );
+    }
+
+    #[test]
+    fn a_fresh_artifact_id_is_not_news() {
+        let dir = empty_workspace();
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(limits());
+        let preview = |id: u32| {
+            format!("[tool] read - big.rs\nfn a()\n[truncated; full output in artifact out-{id}]")
+        };
+        assert_eq!(
+            ok(&mut progress, cwd, "read", &preview(3)),
+            ProgressEvent::Learned
+        );
+        assert_eq!(
+            ok(&mut progress, cwd, "read", &preview(4)),
+            ProgressEvent::Idle
+        );
+        assert_eq!(
+            ok(
+                &mut progress,
+                cwd,
+                "read",
+                "[tool] read - x\nlayout-12 vs layout-13"
+            ),
+            ProgressEvent::Learned
+        );
+        assert_eq!(
+            ok(
+                &mut progress,
+                cwd,
+                "read",
+                "[tool] read - y\nlayout-12 vs layout-14"
+            ),
+            ProgressEvent::Learned,
+            "only bare artifact ids are blanked"
+        );
+    }
+
+    #[test]
+    fn idle_calls_in_a_row_stall_and_progress_resets_them() {
+        let dir = empty_workspace();
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(limits());
+        ok(&mut progress, cwd, "bash make", "same");
+        ok(&mut progress, cwd, "bash make", "same");
+        ok(&mut progress, cwd, "bash make", "same");
+        assert!(!progress.stalled(), "two idle calls after one learned");
+        changed(&mut progress, cwd);
+        ok(&mut progress, cwd, "bash make", "same");
+        ok(&mut progress, cwd, "bash make", "same");
+        assert!(!progress.stalled());
+        ok(&mut progress, cwd, "bash make", "same");
+        assert!(progress.stalled());
+        assert!(
+            progress.stall_message().contains("3 of them bash make"),
+            "{}",
+            progress.stall_message()
+        );
+    }
+
+    /// Distinct `python3 -c` probes with new output each time are exploration:
+    /// every one is `learned`, so the run keeps going (the old success-family
+    /// budget stopped it).
+    #[test]
+    fn distinct_probes_with_new_output_keep_running() {
+        let dir = empty_workspace();
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(limits());
+        for index in 0..40 {
+            let result = format!("[tool] bash - python3 -c ...\nvalue {}", "x".repeat(index));
+            ok(&mut progress, cwd, "bash python3", &result);
+        }
+        assert!(!progress.stalled());
+    }
+
+    /// The D09 run: one command re-run between probes that each return
+    /// something new. No unbroken idle streak, but half the window is idle.
+    #[test]
+    fn a_repeat_interleaved_with_new_probes_stalls_by_density() {
+        let dir = empty_workspace();
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(limits());
+        let mut calls = 0;
+        while !progress.stalled() && calls < 40 {
+            ok(&mut progress, cwd, "bash sed", &format!("TOTAL {calls}"));
+            ok(&mut progress, cwd, "bash sed", "TOTAL 42");
+            calls += 2;
+        }
+        assert!(
+            progress.stalled(),
+            "the repeat must not hide behind the probes"
+        );
+        assert!(calls <= 8, "{calls}");
+    }
+
+    #[test]
+    fn an_error_that_only_echoes_its_arguments_is_not_new() {
+        let dir = empty_workspace();
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(limits());
+        let failure = |progress: &mut RunProgress, name: &str| {
+            let args = serde_json::json!({"command": format!("cat {name}")}).to_string();
+            let result = format!(
+                "[tool] bash - cat {name}\ncat: {name}: No such file or directory\n[exit 1]"
+            );
+            progress.record_tool_result(
+                cwd,
+                ToolOutcome {
+                    arguments: &args,
+                    is_error: true,
+                    ..outcome("bash cat", &result)
+                },
+            )
+        };
+        assert_eq!(
+            failure(&mut progress, "missing-1.txt"),
+            ProgressEvent::FailedNew
+        );
+        assert_eq!(failure(&mut progress, "missing-2.txt"), ProgressEvent::Idle);
+        let other = progress.record_tool_result(
+            cwd,
+            ToolOutcome {
+                is_error: true,
+                ..outcome("bash cat", "cat: permission denied")
+            },
+        );
+        assert_eq!(
+            other,
+            ProgressEvent::FailedNew,
+            "a different message is news"
+        );
+    }
+
+    /// Two failing calls alternating: each error is new once, then idle.
+    #[test]
+    fn alternating_known_failures_stall() {
+        let dir = empty_workspace();
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(limits());
+        for _ in 0..2 {
+            fail(&mut progress, cwd, "bash cargo", "error: a");
+            fail(&mut progress, cwd, "bash npm", "error: b");
+        }
+        assert!(!progress.stalled(), "two new errors, then two idle");
+        fail(&mut progress, cwd, "bash cargo", "error: a");
+        assert!(progress.stalled());
+    }
+
+    /// A `bg logs` poll with growing output is `learned`; with static output
+    /// it is idle.
+    #[test]
+    fn background_polls_are_judged_by_their_output() {
+        let dir = empty_workspace();
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(limits());
+        let mut log = String::new();
+        for line in [
+            "compiling a",
+            "compiling b",
+            "compiling c",
+            "compiling d",
+            "linking",
+        ] {
+            log.push_str(line);
+            log.push('\n');
+            ok(&mut progress, cwd, "bg logs", &log);
+        }
+        assert!(!progress.stalled());
+        for _ in 0..3 {
+            ok(&mut progress, cwd, "bg logs", &log);
+        }
+        assert!(progress.stalled());
+    }
+
+    /// A `sed -i` loop changes files without reporting a change: at the
+    /// stall decision the workspace moved, so it is progress.
+    #[test]
+    fn a_workspace_that_moved_under_an_idle_streak_is_progress() {
+        let dir = empty_workspace();
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(limits());
+        // The first empty output is news; the next two start the idle streak.
+        ok(&mut progress, cwd, "bash sed", "");
+        ok(&mut progress, cwd, "bash sed", "");
+        ok(&mut progress, cwd, "bash sed", "");
+        std::fs::write(cwd.join("a.txt"), "changed").unwrap();
+        assert_eq!(
+            ok(&mut progress, cwd, "bash sed", ""),
+            ProgressEvent::Changed
+        );
+        assert!(!progress.stalled());
+    }
+
+    #[test]
+    fn recheck_clears_a_stall_after_a_later_workspace_change() {
+        let dir = empty_workspace();
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(limits());
+        for _ in 0..4 {
+            ok(&mut progress, cwd, "bash true", "");
+        }
+        assert!(progress.stalled());
+        progress.recheck_workspace(cwd);
+        assert!(progress.stalled(), "nothing moved");
+        std::fs::write(cwd.join("b.txt"), "x").unwrap();
+        progress.recheck_workspace(cwd);
+        assert!(!progress.stalled());
+    }
+
+    #[test]
+    fn a_certain_loop_spends_the_budget_and_keeps_its_reason() {
+        let dir = empty_workspace();
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(limits());
+        progress.record_loop("the same call ran 4 times in a row.");
+        assert!(progress.stalled());
+        // A workspace change cannot clear a certain loop at batch end.
+        std::fs::write(cwd.join("c.txt"), "x").unwrap();
+        progress.recheck_workspace(cwd);
+        assert!(progress.stalled());
+        assert!(progress.stall_message().contains("4 times in a row"));
+        assert!(progress.try_pivot());
+        assert!(!progress.stalled(), "a pivot starts a fresh idle count");
+        assert!(!progress.try_pivot(), "one pivot per turn");
+    }
+
+    #[test]
+    fn results_seen_before_a_pivot_stay_seen() {
+        let dir = empty_workspace();
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(limits());
+        ok(&mut progress, cwd, "read", "same file");
+        assert!(progress.try_pivot());
+        assert_eq!(
+            ok(&mut progress, cwd, "read", "same file"),
+            ProgressEvent::Idle
+        );
+    }
+
+    #[test]
+    fn checkpoints_renew_only_on_progress_since_the_last_one() {
+        let dir = empty_workspace();
+        let cwd = dir.path();
         let mut progress = RunProgress::new(limits());
         for _ in 0..4 {
             progress.model_call_started();
         }
-        record(
-            &mut progress,
-            dir.path(),
-            "bash cat",
-            "bash cat :: cat notes.txt",
-            "new facts",
-            false,
-            // A checkpoint renews on the same progress the stall tracker
-            // counts: a file change or a passing verification.
-            true,
-            false,
-        );
+        ok(&mut progress, cwd, "read", "new facts");
         assert_eq!(
             progress.model_checkpoint(),
             BudgetCheck::Renewed(StopReason::ModelBudget)
         );
         assert_eq!(progress.renewals, 1);
         assert_eq!(progress.model_calls, 4, "cumulative remains for reporting");
-        assert_eq!(progress.epoch_model_calls, 0);
         assert_eq!(progress.model_checkpoint(), BudgetCheck::Ok);
+        for _ in 0..4 {
+            progress.model_call_started();
+        }
+        // Only repeats in this allowance: the renewal must be earned again.
+        ok(&mut progress, cwd, "read", "new facts");
+        assert_eq!(
+            progress.model_checkpoint(),
+            BudgetCheck::Exhausted(StopReason::ModelBudget)
+        );
+    }
+
+    #[test]
+    fn tool_checkpoint_renews_for_a_productive_batch() {
+        let dir = empty_workspace();
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(limits());
+        for index in 0..9 {
+            ok(
+                &mut progress,
+                cwd,
+                "read",
+                &format!("file {}", "y".repeat(index)),
+            );
+        }
+        assert_eq!(
+            progress.tool_checkpoint(3),
+            BudgetCheck::Renewed(StopReason::ToolBudget)
+        );
+        assert_eq!(progress.tool_checkpoint(3), BudgetCheck::Ok);
     }
 
     #[test]
@@ -1575,18 +1640,12 @@ mod tests {
             progress.model_checkpoint(),
             BudgetCheck::Exhausted(StopReason::ModelBudget)
         );
-        assert!(progress.try_pivot(), "the first checkpoint pivots");
-        assert!(
-            progress
-                .pivot_message(StopReason::ModelBudget)
-                .contains("switch to a different method")
-        );
+        assert!(progress.try_pivot());
         assert_eq!(
             progress.model_checkpoint(),
             BudgetCheck::Ok,
             "fresh allowance"
         );
-        assert_eq!(progress.renewals, 0, "a pivot is not a productive renewal");
         for _ in 0..4 {
             progress.model_call_started();
         }
@@ -1594,526 +1653,42 @@ mod tests {
             progress.model_checkpoint(),
             BudgetCheck::Exhausted(StopReason::ModelBudget)
         );
-        assert!(!progress.try_pivot(), "the second checkpoint ends the turn");
+        assert!(!progress.try_pivot());
     }
 
     #[test]
-    fn a_pivot_clears_the_stall_guard() {
+    fn workspace_reads_are_memoized_and_bounded() {
+        static COMPUTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        fn counted(cwd: &Path) -> Option<String> {
+            COMPUTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            workspace_state(cwd)
+        }
         let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..10 {
-            record(
+        let cwd = dir.path();
+        let mut progress = RunProgress::new(RunLimits {
+            idle_budget: 1_000,
+            ..limits()
+        });
+        progress.ledger.fingerprint = counted;
+        // Many short idle streaks over an unchanged workspace share one reading.
+        for index in 0..20 {
+            ok(&mut progress, cwd, "bash x", "same");
+            ok(
                 &mut progress,
-                dir.path(),
-                "bash ls",
-                &format!("bash ls :: ls /missing-{index}"),
-                "no such file",
-                true,
-                false,
-                false,
+                cwd,
+                "bash x",
+                &format!("new {}", "z".repeat(index)),
             );
         }
-        assert!(progress.stalled());
-        assert!(progress.try_pivot());
-        assert!(!progress.stalled(), "the next approach starts clean");
-        assert!(
-            progress
-                .pivot_message(StopReason::Stalled)
-                .starts_with("[totality] stalled:")
-        );
-        assert!(!progress.try_pivot(), "one pivot per turn");
-    }
-
-    #[test]
-    fn checkpoint_without_progress_stops() {
+        assert_eq!(COMPUTED.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // A long streak takes one fresh reading at the stall decision only.
         let mut progress = RunProgress::new(limits());
-        for _ in 0..4 {
-            progress.model_call_started();
+        progress.ledger.fingerprint = counted;
+        COMPUTED.store(0, std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..10 {
+            ok(&mut progress, cwd, "bash x", "");
         }
-        assert_eq!(
-            progress.model_checkpoint(),
-            BudgetCheck::Exhausted(StopReason::ModelBudget)
-        );
-        assert_eq!(progress.renewals, 0);
-    }
-
-    #[test]
-    fn repeated_results_are_not_progress() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..6 {
-            record(
-                &mut progress,
-                dir.path(),
-                "bash cat",
-                &format!("bash cat :: cat notes-{index}.txt"),
-                "same",
-                false,
-                false,
-                false,
-            );
-        }
-        // Four model calls after five repeats of the same result.
-        for _ in 0..4 {
-            progress.model_call_started();
-        }
-        assert_eq!(
-            progress.model_checkpoint(),
-            BudgetCheck::Exhausted(StopReason::ModelBudget)
-        );
-    }
-
-    #[test]
-    fn stale_progress_does_not_renew() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        record(
-            &mut progress,
-            dir.path(),
-            "bash cat",
-            "bash cat :: cat notes.txt",
-            "useful",
-            false,
-            false,
-            false,
-        );
-        for index in 0..6 {
-            record(
-                &mut progress,
-                dir.path(),
-                &format!("bash probe-{index}"),
-                &format!("bash probe-{index} :: probe {index}"),
-                &format!("noise-{index}"),
-                true,
-                false,
-                false,
-            );
-        }
-        for _ in 0..4 {
-            progress.model_call_started();
-        }
-        assert_eq!(
-            progress.model_checkpoint(),
-            BudgetCheck::Exhausted(StopReason::ModelBudget)
-        );
-    }
-
-    #[test]
-    fn tool_checkpoint_renews_for_a_productive_batch() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for calls in 0..9 {
-            record(
-                &mut progress,
-                dir.path(),
-                "bash cat",
-                &format!("bash cat :: cat notes-{calls}.txt"),
-                &format!("result {calls}"),
-                false,
-                // The last call changed a file: that is what renews a
-                // checkpoint, not a merely new result.
-                calls == 8,
-                false,
-            );
-        }
-        assert_eq!(
-            progress.tool_checkpoint(2),
-            BudgetCheck::Renewed(StopReason::ToolBudget)
-        );
-        assert_eq!(progress.epoch_tool_calls, 0);
-        // The batch itself may cross the new checkpoint.
-        assert_eq!(
-            progress.tool_checkpoint(20),
-            BudgetCheck::Exhausted(StopReason::ToolBudget)
-        );
-    }
-
-    #[test]
-    fn file_change_is_progress_even_when_the_result_repeats() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        record(
-            &mut progress,
-            dir.path(),
-            "bash cat",
-            "bash cat :: cat notes.txt",
-            "ok",
-            false,
-            true,
-            false,
-        );
-        for _ in 0..4 {
-            progress.model_call_started();
-        }
-        assert_eq!(
-            progress.model_checkpoint(),
-            BudgetCheck::Renewed(StopReason::ModelBudget)
-        );
-    }
-
-    #[test]
-    fn stall_needs_consecutive_identical_fingerprints() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for _ in 0..3 {
-            record(
-                &mut progress,
-                dir.path(),
-                "bash cat",
-                "bash cat :: cat notes.txt",
-                "r",
-                false,
-                false,
-                false,
-            );
-        }
-        assert!(progress.stalled());
-        record(
-            &mut progress,
-            dir.path(),
-            "bash cat",
-            "bash cat :: cat other.txt",
-            "r",
-            false,
-            false,
-            false,
-        );
-        assert!(!progress.stalled());
-    }
-
-    #[test]
-    fn file_change_resets_stall() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for _ in 0..2 {
-            record(
-                &mut progress,
-                dir.path(),
-                "bash cat",
-                "bash cat :: cat notes.txt",
-                "r",
-                false,
-                false,
-                false,
-            );
-        }
-        record(
-            &mut progress,
-            dir.path(),
-            "bash cat",
-            "bash cat :: cat notes.txt",
-            "r",
-            false,
-            true,
-            false,
-        );
-        assert!(!progress.stalled());
-    }
-
-    #[test]
-    fn failed_results_are_never_progress() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..6 {
-            record(
-                &mut progress,
-                dir.path(),
-                &format!("family-{index}"),
-                &format!("family-{index} :: call {index}"),
-                &format!("distinct failure {index}"),
-                true,
-                false,
-                false,
-            );
-        }
-        for _ in 0..4 {
-            progress.model_call_started();
-        }
-        assert_eq!(
-            progress.model_checkpoint(),
-            BudgetCheck::Exhausted(StopReason::ModelBudget)
-        );
-    }
-
-    #[test]
-    fn failing_calls_of_one_family_trip_the_family_guard() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..8 {
-            record(
-                &mut progress,
-                dir.path(),
-                "bash tesseract",
-                &format!("bash tesseract :: tesseract receipt-{index}.png"),
-                &format!("[exit 1] cannot read receipt-{index}.png"),
-                true,
-                false,
-                false,
-            );
-            if index < 7 {
-                assert!(!progress.stalled(), "call {} is below the limit", index + 1);
-            }
-        }
-        assert!(progress.stalled());
-        assert!(progress.stall_message().contains("bash tesseract"));
-    }
-
-    #[test]
-    fn family_repeats_count_across_interleaved_calls() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..7 {
-            record(
-                &mut progress,
-                dir.path(),
-                "bash tesseract",
-                &format!("bash tesseract :: tesseract receipt-{index}.png"),
-                "failed",
-                true,
-                false,
-                false,
-            );
-            record(
-                &mut progress,
-                dir.path(),
-                "bash cat",
-                &format!("bash cat :: cat note-{index}.txt"),
-                &format!("content {index}"),
-                false,
-                false,
-                false,
-            );
-        }
-        assert!(
-            !progress.stalled(),
-            "an interleaved call must not clear the family count"
-        );
-        record(
-            &mut progress,
-            dir.path(),
-            "bash tesseract",
-            "bash tesseract :: tesseract receipt-8.png",
-            "failed",
-            true,
-            false,
-            false,
-        );
-        assert!(progress.stalled());
-    }
-
-    #[test]
-    fn a_same_family_success_does_not_clear_its_failures() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..8 {
-            record(
-                &mut progress,
-                dir.path(),
-                "bash tesseract",
-                &format!("bash tesseract :: tesseract page-{index}.png"),
-                "failed",
-                true,
-                false,
-                false,
-            );
-            // An exit-0 call that changed nothing is not progress either.
-            record(
-                &mut progress,
-                dir.path(),
-                "bash tesseract",
-                &format!("bash tesseract :: tesseract page-{index}.png out-{index}.txt"),
-                &format!("garbage {index}"),
-                false,
-                false,
-                false,
-            );
-        }
-        assert!(progress.stalled());
-        assert!(progress.stall_message().contains("failing calls"));
-    }
-
-    #[test]
-    fn identical_failures_trip_at_the_third_repeat_even_when_interleaved() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        let fail = |progress: &mut RunProgress, dir: &Path| {
-            record(
-                progress,
-                dir,
-                "edit",
-                "edit :: path=a.rs",
-                "[NO_CHANGE] `old` and `new` are identical",
-                true,
-                false,
-                false,
-            );
-        };
-        fail(&mut progress, dir.path());
-        // A different call between two identical failures must not reset the
-        // duplicate count; only a file change does.
-        record(
-            &mut progress,
-            dir.path(),
-            "bash ls",
-            "bash ls :: ls",
-            "a.rs",
-            false,
-            false,
-            false,
-        );
-        fail(&mut progress, dir.path());
-        assert!(!progress.stalled(), "two repeats are not yet a loop");
-        fail(&mut progress, dir.path());
-        assert!(progress.stalled());
-        assert!(
-            progress
-                .stall_message()
-                .contains("`old` and `new` are identical"),
-            "the stop message quotes the repeated error: {}",
-            progress.stall_message()
-        );
-    }
-
-    #[test]
-    fn ordinary_reads_with_the_same_output_do_not_trip_the_duplicate_guard() {
-        // #138: reading the same bytes again is inspection. Alternate two
-        // paths so the consecutive-identical guard is not the thing under
-        // test; the duplicate counter must also stay off for a successful
-        // read, even when its result repeats.
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..8 {
-            let path = if index % 2 == 0 { "a.rs" } else { "b.rs" };
-            record_reading(
-                &mut progress,
-                dir.path(),
-                "read",
-                &format!("read :: path={path}"),
-                "working tree clean",
-                false,
-                false,
-                false,
-                true,
-            );
-            assert!(!progress.stalled(), "call {} is inspection", index + 1);
-        }
-    }
-
-    #[test]
-    fn identical_successful_calls_trip_the_repeat_guard() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..8 {
-            record(
-                &mut progress,
-                dir.path(),
-                "bash python3",
-                "bash python3 :: python3 probe.py",
-                &format!("slightly different garbage {index}"),
-                false,
-                false,
-                false,
-            );
-            if index < 7 {
-                assert!(!progress.stalled(), "call {} is below the limit", index + 1);
-            }
-        }
-        assert!(progress.stalled());
-        assert!(progress.stall_message().contains("same call was repeated"));
-    }
-
-    #[test]
-    fn identical_failures_trip_on_the_third_repeat_even_interleaved() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        let signature = "edit :: path=a.txt,old=<body>,new=<body>";
-        let error = "[NO_CHANGE] `old` and `new` are identical; nothing to replace";
-        for round in 0..3 {
-            record(
-                &mut progress,
-                dir.path(),
-                "edit path=a.txt",
-                signature,
-                error,
-                true,
-                false,
-                false,
-            );
-            if round < 2 {
-                // A different call in between must not hide the repeat.
-                record(
-                    &mut progress,
-                    dir.path(),
-                    "read",
-                    &format!("read :: path=b{round}.txt"),
-                    &format!("b{round} contents"),
-                    false,
-                    false,
-                    false,
-                );
-                assert!(!progress.stalled(), "round {round} is below the limit");
-            }
-        }
-        assert!(progress.stalled());
-        let message = progress.stall_message();
-        assert!(message.contains("byte-identical output"), "{message}");
-        assert!(
-            message.contains("NO_CHANGE"),
-            "the error is quoted: {message}"
-        );
-    }
-
-    #[test]
-    fn unproductive_successes_trip_at_their_own_limit() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..24 {
-            record(
-                &mut progress,
-                dir.path(),
-                "bash python3",
-                &format!("bash python3 :: probe {index}"),
-                &format!("garbage {index}"),
-                false,
-                false,
-                false,
-            );
-            if index < 23 {
-                assert!(!progress.stalled(), "call {} is below the limit", index + 1);
-            }
-        }
-        assert!(progress.stalled());
-        assert!(progress.stall_message().contains("24 successful calls"));
-    }
-
-    #[test]
-    fn read_only_successes_never_trip_the_success_budget() {
-        let dir = empty_workspace();
-        for index in 0..40 {
-            std::fs::write(dir.path().join(format!("note-{index}.txt")), "x").unwrap();
-        }
-        let mut progress = RunProgress::new(limits());
-        for index in 0..40 {
-            call(
-                &mut progress,
-                dir.path(),
-                "bash",
-                &serde_json::json!({"command": format!("cat note-{index}.txt")}),
-                &format!("line {index}"),
-                false,
-                false,
-            );
-            call(
-                &mut progress,
-                dir.path(),
-                "read",
-                &serde_json::json!({"path": format!("note-{index}.txt")}),
-                &format!("line {index}"),
-                false,
-                false,
-            );
-        }
-        assert!(!progress.stalled());
+        assert_eq!(COMPUTED.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -2184,385 +1759,8 @@ mod tests {
         }
     }
 
-    /// A job being polled with new output is a build advancing, not a loop:
-    /// `bg` polls are read-only, and the coarse family no longer lumps them in
-    /// with the `bg start` that produced the work.
-    #[test]
-    fn background_polls_with_new_output_are_not_a_stop() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..30 {
-            call(
-                &mut progress,
-                dir.path(),
-                "bg",
-                &serde_json::json!({"action": "logs", "id": "bg-1", "lines": 40}),
-                &format!("[{index}/600] Compiling crate_{index}"),
-                false,
-                false,
-            );
-            assert!(!progress.stalled(), "poll {} stopped the turn", index + 1);
-        }
-    }
-
-    /// The success budget counts work that changed nothing; a turn that starts
-    /// jobs and polls them is one unit of work, not 24 idle calls.
-    #[test]
-    fn mixed_background_actions_do_not_trip_the_success_budget() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..24 {
-            let (name, args, result) = match index % 3 {
-                0 => (
-                    "bg",
-                    serde_json::json!({"action": "start", "command": format!("job-{index}")}),
-                    format!("started bg-{}", index / 3),
-                ),
-                1 => (
-                    "bg",
-                    serde_json::json!({"action": "status", "id": format!("bg-{}", index / 3)}),
-                    format!("bg-{} running", index / 3),
-                ),
-                _ => (
-                    "bg",
-                    serde_json::json!({"action": "logs", "id": format!("bg-{}", index / 3)}),
-                    format!("line {index}"),
-                ),
-            };
-            call(
-                &mut progress,
-                dir.path(),
-                name,
-                &args,
-                &result,
-                false,
-                false,
-            );
-        }
-        assert!(!progress.stalled());
-    }
-
-    /// A long thread of distinct GETs is exploration, not an idle loop.
-    #[test]
-    fn distinct_curl_reads_are_not_idle_successes() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..40 {
-            call(
-                &mut progress,
-                dir.path(),
-                "bash",
-                &serde_json::json!({"command": format!("curl -s https://docs.example/{index}.html")}),
-                &format!("<html>page {index}</html>"),
-                false,
-                false,
-            );
-            assert!(!progress.stalled(), "GET {} stopped the turn", index + 1);
-        }
-    }
-
-    /// A `curl` that uploads, posts, or writes a file is work, so it still
-    /// counts against the family that changed nothing.
-    #[test]
-    fn a_curl_that_writes_still_counts_against_the_success_budget() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..24 {
-            call(
-                &mut progress,
-                dir.path(),
-                "bash",
-                &serde_json::json!({"command": format!("curl -X POST -d item={index} https://api.example/items")}),
-                &format!("created {index}"),
-                false,
-                false,
-            );
-            if index < 23 {
-                assert!(!progress.stalled(), "call {} is below the limit", index + 1);
-            }
-        }
-        assert!(progress.stalled());
-        assert!(
-            progress
-                .stall_message()
-                .contains("24 successful calls of bash curl"),
-            "{}",
-            progress.stall_message()
-        );
-    }
-
-    /// Reading history is inspection: forty distinct `git show` calls are not
-    /// forty idle successes.
-    #[test]
-    fn git_history_reads_are_not_idle_successes() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..25 {
-            call(
-                &mut progress,
-                dir.path(),
-                "bash",
-                &serde_json::json!({"command": format!("git show HEAD~{index}:src/main.rs")}),
-                &format!("commit {index} content"),
-                false,
-                false,
-            );
-            assert!(!progress.stalled(), "show {} stopped the turn", index + 1);
-        }
-    }
-
-    /// A read of a pull request is inspection too.
-    #[test]
-    fn github_reads_are_not_idle_successes() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..30 {
-            call(
-                &mut progress,
-                dir.path(),
-                "bash",
-                &serde_json::json!({"command": format!("gh pr view {index} --json title,state")}),
-                &format!("PR {index}"),
-                false,
-                false,
-            );
-        }
-        assert!(!progress.stalled());
-    }
-
-    #[test]
-    fn fingerprint_reads_are_memoized_across_counters_and_calls() {
-        static COMPUTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        fn counted(cwd: &Path) -> Option<String> {
-            COMPUTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            workspace_state(cwd)
-        }
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        progress.stall.fingerprint = counted;
-        // Distinct families, a few calls each: every counter needs a baseline
-        // for the same unchanged workspace, so all of them share one reading.
-        for family in 0..10 {
-            for index in 0..3 {
-                call(
-                    &mut progress,
-                    dir.path(),
-                    "bash",
-                    &serde_json::json!({"command": format!("probe-{family} {index}")}),
-                    &format!("probe {family}/{index}"),
-                    false,
-                    false,
-                );
-            }
-        }
-        assert!(!progress.stalled());
-        assert_eq!(
-            COMPUTED.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "one workspace reading serves every counter"
-        );
-    }
-
-    #[test]
-    fn fingerprint_reads_are_bounded_at_a_trip_decision() {
-        static COMPUTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        fn counted(cwd: &Path) -> Option<String> {
-            COMPUTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            workspace_state(cwd)
-        }
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        progress.stall.fingerprint = counted;
-        for index in 0..30 {
-            call(
-                &mut progress,
-                dir.path(),
-                "bash",
-                &serde_json::json!({"command": format!("python3 probe-{index}.py")}),
-                &format!("garbage {index}"),
-                false,
-                false,
-            );
-        }
-        assert!(progress.stalled(), "24 idle successes stop the turn");
-        progress.recheck_workspace(dir.path());
-        // One reading for the baseline, one to decide the trip, and one at the
-        // batch re-check; the calls after the trip take none.
-        assert!(
-            COMPUTED.load(std::sync::atomic::Ordering::SeqCst) <= 3,
-            "expected at most 3 workspace readings, got {}",
-            COMPUTED.load(std::sync::atomic::Ordering::SeqCst)
-        );
-    }
-
-    #[test]
-    fn a_reported_change_invalidates_the_memoized_fingerprint() {
-        static COMPUTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        fn counted(cwd: &Path) -> Option<String> {
-            COMPUTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            workspace_state(cwd)
-        }
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        progress.stall.fingerprint = counted;
-        call(
-            &mut progress,
-            dir.path(),
-            "bash",
-            &serde_json::json!({"command": "python3 a.py"}),
-            "one",
-            false,
-            false,
-        );
-        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
-        call(
-            &mut progress,
-            dir.path(),
-            "bash",
-            &serde_json::json!({"command": "python3 b.py"}),
-            "two",
-            false,
-            true,
-        );
-        call(
-            &mut progress,
-            dir.path(),
-            "bash",
-            &serde_json::json!({"command": "python3 c.py"}),
-            "three",
-            false,
-            false,
-        );
-        assert_eq!(
-            COMPUTED.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "the reported change forces a new reading on the next call"
-        );
-    }
-
-    #[test]
-    fn failing_reads_of_different_files_are_different_families() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..20 {
-            let family = tool_family(
-                "read",
-                &serde_json::json!({"path": format!("missing-{index}.txt")}).to_string(),
-            );
-            record(
-                &mut progress,
-                dir.path(),
-                &family,
-                &family,
-                "missing",
-                true,
-                false,
-                false,
-            );
-        }
-        assert!(!progress.stalled());
-    }
-
-    #[test]
-    fn progress_in_the_same_batch_clears_a_family_trip() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..8 {
-            record(
-                &mut progress,
-                dir.path(),
-                "bash tesseract",
-                &format!("bash tesseract :: tesseract page-{index}.png"),
-                "failed",
-                true,
-                false,
-                false,
-            );
-        }
-        assert!(progress.stalled());
-        record(
-            &mut progress,
-            dir.path(),
-            "edit path=receipt.txt",
-            "edit path=receipt.txt",
-            "edited",
-            false,
-            true,
-            false,
-        );
-        assert!(
-            !progress.stalled(),
-            "a real file change in the same batch is progress, not a stall"
-        );
-    }
-
-    #[test]
-    fn a_workspace_change_at_trip_time_restarts_the_counter() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..8 {
-            record(
-                &mut progress,
-                dir.path(),
-                "bash sed",
-                &format!("bash sed :: sed -i s/{index}/x/ receipt.txt"),
-                "failed",
-                true,
-                false,
-                false,
-            );
-            if index == 3 {
-                // A bash `sed -i` changes the file without the harness seeing
-                // it; the trip is checked against the workspace the counter
-                // started in, so real work restarts it instead of stopping.
-                std::fs::write(dir.path().join("receipt.txt"), "fixed\n").unwrap();
-            }
-        }
-        assert!(!progress.stalled());
-    }
-
-    #[test]
-    fn recheck_clears_a_trip_after_a_later_workspace_change() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(limits());
-        for index in 0..8 {
-            record(
-                &mut progress,
-                dir.path(),
-                "bash sed",
-                &format!("bash sed :: sed -i s/{index}/x/ receipt.txt"),
-                "no such file",
-                true,
-                false,
-                false,
-            );
-        }
-        assert!(progress.stalled(), "the trip fired during the batch");
-        std::fs::write(dir.path().join("receipt.txt"), "fixed\n").unwrap();
-        progress.recheck_workspace(dir.path());
-        assert!(
-            !progress.stalled(),
-            "the workspace changed after the trip, so the batch made progress"
-        );
-    }
-
-    #[test]
-    fn zero_disables_both_family_budgets() {
-        let dir = empty_workspace();
-        let mut progress = RunProgress::new(disabled());
-        for index in 0..40 {
-            record(
-                &mut progress,
-                dir.path(),
-                "bash python3",
-                "bash python3 :: python3 probe.py",
-                &format!("garbage {index}"),
-                index % 2 == 0,
-                false,
-                false,
-            );
-        }
-        assert!(!progress.stalled());
+    fn args(command: &str) -> String {
+        serde_json::json!({"command": command}).to_string()
     }
 
     #[test]
@@ -2636,28 +1834,6 @@ mod tests {
     }
 
     #[test]
-    fn bash_signatures_hide_temp_paths_numbers_and_heredoc_bodies() {
-        let signature = |command: &str| tool_signature("bash", &args(command));
-        assert_eq!(
-            signature("tesseract /tmp/a/receipt.png out.txt --psm 6"),
-            signature("tesseract /tmp/b/receipt.png out.txt --psm 3")
-        );
-        assert_eq!(
-            signature("python3 <<'EOF'\nprint(1)\nEOF"),
-            signature("python3 <<'EOF'\nprint(2); print(3)\nEOF")
-        );
-        assert_ne!(
-            signature("tesseract receipt-a.png"),
-            signature("tesseract receipt-b.png")
-        );
-        assert_ne!(
-            signature("cat note-1.txt"),
-            signature("cat note-2.txt"),
-            "digits inside a name are part of the target, not a counter"
-        );
-    }
-
-    #[test]
     fn other_tool_families_keep_targets_and_drop_bodies() {
         let family = |value: serde_json::Value| tool_family("tests", &value.to_string());
         assert_ne!(
@@ -2688,17 +1864,6 @@ mod tests {
                 &serde_json::json!({"path": "/tmp/scratch-2/x.txt", "content": "b"}).to_string()
             ),
             "temporary-path normalization is for bash families only"
-        );
-        assert_ne!(
-            tool_signature(
-                "write",
-                &serde_json::json!({"path": "a.txt", "content": "one"}).to_string()
-            ),
-            tool_signature(
-                "write",
-                &serde_json::json!({"path": "a.txt", "content": "two"}).to_string()
-            ),
-            "different content is a different call, not a repeat"
         );
     }
 }

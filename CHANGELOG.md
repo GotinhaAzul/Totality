@@ -44,6 +44,19 @@ release may change defaults when the change is called out below.
 
 ### Changed
 
+- One progress ledger replaces the stall guard, the three tool-family
+  counters, the duplicate-result counter, and the checkpoints' own progress
+  windows ([#169](https://github.com/GotinhaAzul/Totality/issues/169)). Every
+  tool result is `changed`, `verified`, `learned` (output not seen this turn),
+  `failed-new` (an error not seen this turn, ignoring echoed arguments), or
+  idle; `[budgets] idle_budget` (8) idle calls within the last 16 since a
+  change or passing verify is a stall that pivots once, then ends the turn.
+  Distinct exploration such as many `python3 -c` probes with new output no
+  longer trips a guard. The loop guard now spends the idle budget instead of
+  ending the turn on its own, so its first trip pivots like any other stall.
+  `stall_calls` is an alias for `idle_budget`; `max_same_tool_family` and
+  `max_same_tool_family_success` are ignored with a warning.
+
 - `bash` and `bg` also refuse the standalone history rewriters
   (`git-filter-repo`, `git-filter-branch`, `bfg`, `python -m
   git_filter_repo`), including inside nested `sh -c` / `bash -c` scripts and
