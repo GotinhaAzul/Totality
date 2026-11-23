@@ -896,6 +896,29 @@ fn diagnostic_engine(configured: &str, detected: &str) -> crate::provider::Engin
 
 /// `tot doctor`: fingerprint the engine and print a capability manifest. Only
 /// metadata probes are used; no chat completion and no model load.
+/// The `tot doctor` surface line: the profile a session would start with and
+/// why (`pinned`, the cached tool probe outcome, or unknown before a probe).
+fn doctor_surface(config: &Config, probe: Option<&crate::provider::probe::ToolProbe>) -> String {
+    if crate::app::surface_pinned(config) {
+        return format!("{} · pinned", config.profile_name());
+    }
+    let mut config = config.clone();
+    match probe {
+        Some(probe) => {
+            crate::app::derive_surface(&mut config, probe);
+            format!(
+                "{} · tool probe {}",
+                config.profile_name(),
+                probe.outcome.code()
+            )
+        }
+        None => format!(
+            "{} · unknown until the tool probe runs (a failed probe selects strict)",
+            config.profile_name()
+        ),
+    }
+}
+
 async fn run_doctor(config: &Config, paths: &Paths, json: bool, fix: bool) -> Result<i32> {
     let mut model = config.model.model.trim().to_string();
     let probe_provider = crate::provider::OpenAiCompatProvider::new(&config.model, model.clone())?;
@@ -939,6 +962,14 @@ async fn run_doctor(config: &Config, paths: &Paths, json: bool, fix: bool) -> Re
         manifest.tool_dialect = cached.mode.clone();
         manifest.tool_probe = Some(cached);
     }
+    // Judged for the model doctor actually resolved: an empty `[model] model`
+    // may have been auto-selected above.
+    let mut surface_config = config.clone();
+    surface_config.model.model = crate::provider::Provider::model(&provider).to_string();
+    manifest.surface = Some(doctor_surface(
+        &surface_config,
+        manifest.tool_probe.as_ref(),
+    ));
     manifest.verify = Some(crate::doctor::VerifyStatus {
         configured: if config.verify.is_detected() {
             0
@@ -2105,6 +2136,47 @@ mod tests {
         assert_eq!(text.pending, "the whole answer");
     }
     use super::*;
+
+    #[test]
+    fn doctor_surface_names_pins_probe_evidence_and_unknown() {
+        use crate::provider::probe::{ToolProbe, ToolProbeOutcome};
+        let probe = |outcome: ToolProbeOutcome| ToolProbe {
+            outcome,
+            model: "qwen3-coder".into(),
+            build: None,
+            mode: String::new(),
+            message: String::new(),
+            checked: String::new(),
+        };
+        let mut config = Config::builtin();
+        config.model.model = "qwen3-coder".into();
+        assert_eq!(
+            doctor_surface(&config, Some(&probe(ToolProbeOutcome::Rejected400))),
+            "strict · tool probe rejected_400"
+        );
+        assert_eq!(
+            doctor_surface(&config, Some(&probe(ToolProbeOutcome::NativeOk))),
+            "coding · tool probe native_ok"
+        );
+        assert!(doctor_surface(&config, None).starts_with("coding · unknown"));
+        // A model-profile pin is a pin, even with a failed probe.
+        let mut pinned = config.clone();
+        pinned.model_profile_override = Some("default".into());
+        assert_eq!(
+            doctor_surface(&pinned, Some(&probe(ToolProbeOutcome::Rejected400))),
+            "coding · pinned"
+        );
+        // So is a user model profile that matches the resolved model.
+        let mut matched = config.clone();
+        matched.model_profiles.insert(
+            "mine".into(),
+            crate::config::ModelProfile {
+                match_: vec!["qwen3".into()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(doctor_surface(&matched, None), "coding · pinned");
+    }
 
     #[test]
     fn provenance_event_json_exposes_the_tag_and_warning() {

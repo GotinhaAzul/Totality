@@ -384,6 +384,20 @@ keep_exif = false
 model profile sets `parallel_tool_calls = false` and `tool_choice = "required"`
 as request hints, and `one_call = true`.
 
+You do not have to pick `strict` yourself. At startup the harness sends one
+forced tool call to check the server (cached per model and build). When it
+fails and nothing is pinned, the session starts on the `strict` surface:
+`rejected_400` and `empty_call` get the six tools, short schemas, no parallel
+calls, `one_call`, and the repair protocol; `tools_dropped` and
+`prose_fallback` get the same without `one_call`. The model's sampler profile
+(a matching preset such as `qwen-coding`) is kept. A notice names the
+evidence, the session records a `profile-change` entry with
+`source = "tool-probe"`, and `tot doctor` prints the `surface:` line. Anything
+you set wins: `--profile`, `TOT_PROFILE`, `default_profile`,
+`--model-profile`, or a model profile of yours whose `match` covers the model.
+The choice is made once per server, so the request prefix stays stable; a
+`/model` switch to another server probes and decides again.
+
 `one_call` is enforced at dispatch, not by prompt text. When a profile sets it,
 the first tool call in an assistant message runs and every later call gets a
 repairable `tool_call_invalid` result instead of running. After two rejected

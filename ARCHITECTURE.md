@@ -149,6 +149,13 @@ Tool-call ids:
 
 Probes improve accuracy but are never required.
 
+The forced tool-call conformance probe runs before tool selection. A failed
+probe with no pinned profile or model profile selects the built-in `strict`
+surface (`app::derive_surface`): a synthetic `probe-strict` model profile copies
+the resolved sampler profile and adds repair mode, short schemas, no parallel
+calls and, for `rejected_400`/`empty_call`, `one_call`. It is decided once per
+server and undone when `/model` reaches a new one or the user picks a profile.
+
 | Probe | Engine | Use |
 |---|---|---|
 | `GET /v1/models` | all | model list, auto-select when exactly one; `/login` validation |

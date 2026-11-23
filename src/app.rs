@@ -416,18 +416,36 @@ pub async fn create_runtime(
     registry.configure_git(&config.git);
     registry.configure_fetch(&config.fetch);
     let mcp = Arc::new(crate::mcp::McpManager::new());
+    // With a background `model.start_command`, the server may not be up yet;
+    // probing would stall the TUI for the request timeout. The probe runs on
+    // the next rebuild (model switch/profile reload) instead. It runs before
+    // tool selection, so its evidence can choose the surface.
+    let tool_probe = if deferred_start {
+        None
+    } else {
+        resolve_tool_probe(provider.as_ref(), &paths, &mut profile, &mut Vec::new()).await
+    };
+    if let Some(probe) = &tool_probe
+        && let Some(line) = derive_surface(&mut config, probe)
+    {
+        profile = config.model_profile().1;
+        session.warnings.push(line.clone());
+        if let Err(error) = session.append(EntryKind::Custom(
+            CustomData::new("profile-change")
+                .with("profile", config.profile_name())
+                .with("source", "tool-probe")
+                .with("evidence", probe.outcome.code()),
+        )) {
+            tracing::warn!(%error, "cannot record the derived surface in the session");
+        }
+    }
     let (tools, mcp_warnings) = select_tools(&registry, &config, &paths, &mcp).await?;
     let tools = permissions.filter_tools(tools, &registry);
     session.warnings.extend(mcp_warnings);
     let mut tool_specs = ToolRegistry::specs_with(&tools, profile.short_tool_schemas());
-    // With a background `model.start_command`, the server may not be up yet;
-    // probing would stall the TUI for the request timeout. The probe runs on
-    // the next rebuild (model switch/profile reload) instead.
-    let tool_probe = if deferred_start {
-        None
-    } else {
-        resolve_tool_probe(provider.as_ref(), &paths, &mut profile, &mut tool_specs).await
-    };
+    if let Some(probe) = &tool_probe {
+        apply_tool_probe(probe, &mut profile, &mut tool_specs);
+    }
     if let Some(probe) = &tool_probe {
         if let Some(warning) = probe.warning() {
             session.warnings.push(warning.clone());
@@ -781,6 +799,34 @@ pub async fn rebuild_core(old: &Arc<Core>, mut config: Config) -> Result<Arc<Cor
         }
         permissions
     };
+    // Same target: keep the conformance result unless it never ran. A model
+    // switch probes again so the mode tracks the newly loaded server, and a
+    // surface derived from the old server's probe is derived again.
+    let tool_probe = if same_target && old.tool_probe.is_some() {
+        old.tool_probe.clone()
+    } else {
+        let mut scratch = config.model_profile().1;
+        resolve_tool_probe(provider.as_ref(), &old.paths, &mut scratch, &mut Vec::new()).await
+    };
+    // A new server is probed again; a profile the user picked since is theirs.
+    if !same_target || config.profile_name != DERIVED_PROFILE {
+        undo_derived_surface(&mut config);
+    }
+    if let Some(probe) = &tool_probe
+        && let Some(line) = derive_surface(&mut config, probe)
+        && !same_target
+        && let Ok(mut session) = old.session.lock()
+    {
+        session.warnings.push(line);
+        if let Err(error) = session.append(EntryKind::Custom(
+            CustomData::new("profile-change")
+                .with("profile", config.profile_name())
+                .with("source", "tool-probe")
+                .with("evidence", probe.outcome.code()),
+        )) {
+            tracing::warn!(%error, "cannot record the derived surface in the session");
+        }
+    }
     let (tools, mcp_warnings) = select_tools(&registry, &config, &old.paths, &old.mcp).await?;
     // Plan mode filters every rebuild, so a workflow or profile switch cannot
     // bring a mutating tool back while it is active.
@@ -823,19 +869,6 @@ pub async fn rebuild_core(old: &Arc<Core>, mut config: Config) -> Result<Arc<Cor
         Some(&repo_brief),
         &agents,
     );
-    // Same target: keep the conformance result unless it never ran. A model
-    // switch probes again so the mode tracks the newly loaded server.
-    let tool_probe = if same_target && old.tool_probe.is_some() {
-        old.tool_probe.clone()
-    } else {
-        resolve_tool_probe(
-            provider.as_ref(),
-            &old.paths,
-            &mut model_profile,
-            &mut tool_specs,
-        )
-        .await
-    };
     if let Some(probe) = &tool_probe {
         apply_tool_probe(probe, &mut model_profile, &mut tool_specs);
     }
@@ -1258,6 +1291,87 @@ fn record_schema_choice(session: &mut Session, choice: &crate::tools::SchemaChoi
     }
 }
 
+/// Built-in tool surface the probe selects for a weak tool caller.
+const DERIVED_PROFILE: &str = "strict";
+/// The synthetic model profile that carries the derived strict behavior on
+/// top of the model's own sampler profile.
+const DERIVED_MODEL_PROFILE: &str = "probe-strict";
+
+/// Choose the tool surface from the conformance probe when nothing is pinned
+/// (#144). A server that rejects tool definitions or answers a forced call
+/// with an empty one gets the `strict` surface: six flat tools, one call per
+/// message, short schemas, no parallel calls, and the repair protocol. A
+/// server that drops tools or answers in prose gets the six tools and the
+/// repair protocol, keeping its own call shape. `native_ok` changes nothing.
+///
+/// A `--profile`, `TOT_PROFILE`, `default_profile`, `--model-profile`, or a
+/// user model profile that matches the model is a pin and always wins. The
+/// model's sampler profile (a user profile or a built-in preset) is kept:
+/// the derived profile copies it and adds only the strict fields. Returns
+/// the notice to show, or `None` when nothing changed.
+/// Whether the user chose the tool surface: a profile (`--profile`,
+/// `TOT_PROFILE`, `default_profile`), a model profile (`--model-profile`,
+/// `TOT_MODEL_PROFILE`), or a model profile of theirs whose `match` covers the
+/// model. Built-in sampler presets are not a choice of surface.
+pub(crate) fn surface_pinned(config: &Config) -> bool {
+    let (resolved, _) = config.model_profile();
+    let user_model_profile =
+        resolved != "default" && !Config::SAMPLER_PRESETS.contains(&resolved.as_str());
+    !config.profile_name.is_empty()
+        || !config.default_profile.is_empty()
+        || config.model_profile_override.is_some()
+        || user_model_profile
+}
+
+pub(crate) fn derive_surface(config: &mut Config, probe: &probe::ToolProbe) -> Option<String> {
+    use probe::ToolProbeOutcome as Outcome;
+    if probe.native() || config.derived_surface.is_some() {
+        return None;
+    }
+    if surface_pinned(config) || !config.profiles.contains_key(DERIVED_PROFILE) {
+        return None;
+    }
+    let mut derived = config.model_profile().1;
+    derived.tool_mode = crate::config::ToolMode::Repair;
+    derived.short_tool_schemas = Some(crate::config::ToolSchemas::Short);
+    derived.parallel_tool_calls = Some(false);
+    if matches!(probe.outcome, Outcome::Rejected400 | Outcome::EmptyCall) {
+        derived.one_call = true;
+    }
+    config
+        .model_profiles
+        .insert(DERIVED_MODEL_PROFILE.into(), derived);
+    config.profile_name = DERIVED_PROFILE.into();
+    config.model_profile_override = Some(DERIVED_MODEL_PROFILE.into());
+    config.derived_surface = Some(probe.outcome.code().to_string());
+    Some(format!(
+        "tool probe: {} — using the `{DERIVED_PROFILE}` surface (read, grep, glob, edit, bash, todo; short schemas{}). Pass --profile to choose another.",
+        probe.outcome.code(),
+        if matches!(probe.outcome, Outcome::Rejected400 | Outcome::EmptyCall) {
+            "; one call per message"
+        } else {
+            ""
+        }
+    ))
+}
+
+/// Forget a surface derived from an earlier server's probe, unless the user
+/// has since picked a profile of their own.
+fn undo_derived_surface(config: &mut Config) {
+    if config.derived_surface.take().is_none() {
+        return;
+    }
+    if config.profile_name == DERIVED_PROFILE {
+        config.profile_name.clear();
+    }
+    // The synthetic model profile goes with it, so a profile the user picked
+    // gets its own model profile back.
+    if config.model_profile_override.as_deref() == Some(DERIVED_MODEL_PROFILE) {
+        config.model_profile_override = None;
+    }
+    config.model_profiles.remove(DERIVED_MODEL_PROFILE);
+}
+
 /// A non-native probe result switches the effective mode to the text/JSON
 /// repair protocol. A server that rejects tool definitions also stops
 /// receiving them, so the next request is not rejected the same way.
@@ -1528,6 +1642,13 @@ mod tests {
             runtime.core.tool_specs.is_empty(),
             "a 400 must stop sending tool definitions"
         );
+        let names: Vec<&str> = runtime.core.tools.iter().map(|tool| tool.name()).collect();
+        assert_eq!(
+            names,
+            vec!["read", "grep", "glob", "edit", "bash", "todo"],
+            "nothing pinned: the probe evidence selects the strict surface"
+        );
+        assert!(runtime.core.model_profile.one_call);
         assert!(
             runtime
                 .core
@@ -1554,6 +1675,84 @@ mod tests {
             "missing warning: {:?}",
             session.warnings
         );
+    }
+
+    fn probe_with(outcome: probe::ToolProbeOutcome) -> probe::ToolProbe {
+        probe::ToolProbe {
+            outcome,
+            model: "m".into(),
+            build: None,
+            mode: if outcome.is_native() {
+                "native"
+            } else {
+                "repair"
+            }
+            .into(),
+            message: String::new(),
+            checked: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_probe_derives_the_strict_surface_only_when_nothing_is_pinned() {
+        use probe::ToolProbeOutcome as Outcome;
+        let mut config = Config::builtin();
+        config.model.model = "qwen3-coder".into();
+        assert!(derive_surface(&mut config, &probe_with(Outcome::NativeOk)).is_none());
+        assert!(config.profile_name.is_empty(), "native_ok changes nothing");
+
+        let line = derive_surface(&mut config, &probe_with(Outcome::Rejected400)).unwrap();
+        assert!(
+            line.contains("rejected_400") && line.contains("--profile"),
+            "{line}"
+        );
+        assert_eq!(config.profile_name(), "strict");
+        let (name, profile) = config.model_profile();
+        assert_eq!(name, DERIVED_MODEL_PROFILE);
+        assert!(profile.one_call);
+        assert_eq!(profile.parallel_tool_calls, Some(false));
+        assert_eq!(
+            profile.temperature,
+            Some(0.2),
+            "the qwen sampler preset is kept"
+        );
+        assert!(
+            derive_surface(&mut config, &probe_with(Outcome::EmptyCall)).is_none(),
+            "decided once"
+        );
+        undo_derived_surface(&mut config);
+        assert_eq!(config.profile_name(), "coding");
+        assert!(config.model_profile_override.is_none());
+        assert!(!config.model_profiles.contains_key(DERIVED_MODEL_PROFILE));
+
+        // Dropped tools or prose: the narrow surface without one_call.
+        derive_surface(&mut config, &probe_with(Outcome::ToolsDropped)).unwrap();
+        assert!(!config.model_profile().1.one_call);
+        undo_derived_surface(&mut config);
+
+        // Every pin wins.
+        for pin in 0..4 {
+            let mut pinned = Config::builtin();
+            pinned.model.model = "qwen3-coder".into();
+            match pin {
+                0 => pinned.profile_name = "coding".into(),
+                1 => pinned.default_profile = "full".into(),
+                2 => pinned.model_profile_override = Some("default".into()),
+                _ => {
+                    pinned.model_profiles.insert(
+                        "mine".into(),
+                        crate::config::ModelProfile {
+                            match_: vec!["qwen3".into()],
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+            assert!(
+                derive_surface(&mut pinned, &probe_with(Outcome::Rejected400)).is_none(),
+                "pin {pin}"
+            );
+        }
     }
 
     #[tokio::test]

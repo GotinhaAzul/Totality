@@ -9,6 +9,14 @@ release may change defaults when the change is called out below.
 
 ### Added
 
+- A failed tool-call conformance probe picks the weak-model surface when
+  nothing is pinned ([#144](https://github.com/GotinhaAzul/Totality/issues/144)):
+  `rejected_400`/`empty_call` start the session on `strict` (six tools, short
+  schemas, `one_call`, repair), `tools_dropped`/`prose_fallback` on the same
+  tools without `one_call`. The model's sampler preset is kept, a notice and a
+  `profile-change` entry name the evidence, and `tot doctor` prints a
+  `surface:` line. Any `--profile`, `default_profile`, `--model-profile`, or
+  matching user model profile wins.
 - `[gates] todo_plan = "derive" | "require" | "off"`. The default, `derive`,
   replaces the `TODO_PLAN` block at a run's third distinct file with a plan the
   harness records from session facts (`change <file>` per changed file, the
