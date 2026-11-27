@@ -152,6 +152,7 @@ pub fn takes_args(command: &str) -> bool {
             | "profile"
             | "theme"
             | "settings"
+            | "copy"
             | "resume"
             | "skill"
             | "workflow"
@@ -515,6 +516,7 @@ fn complete_argument(
             ),
             Candidate::new("forget", "remove a session allow pattern: forget <n|all>"),
         ],
+        ("copy", []) => vec![Candidate::new("code", "only the last code block")],
         ("pr", []) => vec![
             Candidate::new("confirm", "carry out the pending pull request action"),
             Candidate::new("cancel", "drop the pending pull request action"),

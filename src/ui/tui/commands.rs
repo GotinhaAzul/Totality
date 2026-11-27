@@ -55,6 +55,8 @@ impl App {
             "verify" => self.command_verify(rest).await,
             "export" => self.command_export(rest),
             "clear" => self.command_clear(),
+            "copy" => self.command_copy(rest),
+            "scrollback" => self.command_scrollback(),
             "debug" => {
                 self.debug = !self.debug;
                 self.set_notice(
