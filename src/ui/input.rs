@@ -14,6 +14,11 @@ use crate::ui::theme::{Role, Theme};
 /// Prompts kept in memory and on disk.
 const HISTORY_LIMIT: usize = 200;
 
+/// A paste longer than this many lines (the prompt box's height) or
+/// characters is shown as a one-line chip; the full text is still sent.
+const PASTE_COLLAPSE_LINES: usize = 8;
+const PASTE_COLLAPSE_CHARS: usize = 1000;
+
 /// Owned editing state for the prompt.
 pub struct InputState {
     pub textarea: TextArea<'static>,
@@ -26,6 +31,10 @@ pub struct InputState {
     /// Per-project file prompts are appended to, so Up recalls them across
     /// restarts. `None` keeps history in memory only.
     history_file: Option<PathBuf>,
+    /// Collapsed pastes in the prompt: the chip shown and the text it stands
+    /// for. A chip the user edits away simply no longer expands.
+    pastes: Vec<(String, String)>,
+    paste_seq: usize,
 }
 
 impl Default for InputState {
@@ -50,6 +59,8 @@ impl InputState {
             completion_index: 0,
             popup_open: false,
             history_file: None,
+            pastes: Vec::new(),
+            paste_seq: 0,
         }
     }
 
@@ -62,14 +73,72 @@ impl InputState {
         self.textarea.lines().iter().all(|line| line.is_empty())
     }
 
-    pub fn take(&mut self) -> String {
+    /// The text as it will be sent: collapsed pastes expanded.
+    pub fn expanded_text(&self) -> String {
+        self.expand(self.text())
+    }
+
+    fn expand(&self, mut text: String) -> String {
+        for (chip, content) in &self.pastes {
+            if text.contains(chip.as_str()) {
+                text = text.replacen(chip.as_str(), content, 1);
+            }
+        }
+        text
+    }
+
+    /// Whether the prompt shows a collapsed paste.
+    pub fn has_collapsed_paste(&self) -> bool {
         let text = self.text();
+        self.pastes
+            .iter()
+            .any(|(chip, _)| text.contains(chip.as_str()))
+    }
+
+    /// Insert pasted text at the cursor. A large paste becomes a chip like
+    /// `[Pasted text #1 +120 lines]` so the rest of the draft stays visible;
+    /// returns the chip when it collapsed.
+    pub fn insert_paste(&mut self, text: &str) -> Option<String> {
+        let lines = text.trim_end_matches('\n').lines().count();
+        if lines <= PASTE_COLLAPSE_LINES && text.chars().count() <= PASTE_COLLAPSE_CHARS {
+            self.insert_text(text);
+            return None;
+        }
+        self.paste_seq += 1;
+        let chip = if lines > 1 {
+            format!("[Pasted text #{} +{lines} lines]", self.paste_seq)
+        } else {
+            format!(
+                "[Pasted text #{} {} chars]",
+                self.paste_seq,
+                text.chars().count()
+            )
+        };
+        self.pastes.push((chip.clone(), text.to_string()));
+        self.insert_text(&chip);
+        Some(chip)
+    }
+
+    /// Put every collapsed paste's full text back in the editor.
+    pub fn expand_pastes(&mut self) -> bool {
+        if !self.has_collapsed_paste() {
+            return false;
+        }
+        let text = self.expanded_text();
+        self.set_text(&text);
+        true
+    }
+
+    pub fn take(&mut self) -> String {
+        let text = self.expanded_text();
         self.textarea.clear();
+        self.pastes.clear();
         self.reset_completion();
         text
     }
 
     pub fn set_text(&mut self, text: &str) {
+        self.pastes.clear();
         self.textarea.clear();
         self.textarea.insert_str(text);
         self.textarea.move_cursor(CursorMove::End);
@@ -82,12 +151,13 @@ impl InputState {
         if !idle {
             return None;
         }
-        let text = self.text();
+        let text = self.expanded_text();
         if text.trim().is_empty() {
             return None;
         }
         self.push_history(&text);
         self.textarea.clear();
+        self.pastes.clear();
         self.history_index = None;
         self.draft.clear();
         self.reset_completion();
@@ -425,6 +495,39 @@ mod tests {
         assert_eq!(second.text(), "second");
         assert!(second.history_prev());
         assert_eq!(second.text(), "line one\nline two");
+    }
+
+    #[test]
+    fn a_large_paste_collapses_to_a_chip_and_is_sent_in_full() {
+        let mut input = InputState::new();
+        input.insert_text("look at this: ");
+        let body: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+        let chip = input.insert_paste(&body).expect("collapsed");
+        assert_eq!(chip, "[Pasted text #1 +20 lines]");
+        assert_eq!(input.text(), format!("look at this: {chip}"));
+        assert!(input.has_collapsed_paste());
+        input.insert_text(" thanks");
+        assert_eq!(
+            input.submit(true).unwrap(),
+            format!("look at this: {body} thanks")
+        );
+        // History recalls the full text, not the chip.
+        assert!(input.history_prev());
+        assert!(input.text().contains("line 20"));
+        assert!(!input.has_collapsed_paste());
+    }
+
+    #[test]
+    fn small_pastes_are_inserted_and_chips_expand_for_editing() {
+        let mut input = InputState::new();
+        assert_eq!(input.insert_paste("a\nb\nc"), None);
+        assert_eq!(input.text(), "a\nb\nc");
+        input.set_text("");
+        input.insert_paste(&"x".repeat(1500)).expect("collapsed");
+        assert_eq!(input.text(), "[Pasted text #1 1500 chars]");
+        assert!(input.expand_pastes());
+        assert_eq!(input.text(), "x".repeat(1500));
+        assert!(!input.expand_pastes());
     }
 
     #[test]

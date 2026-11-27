@@ -175,7 +175,8 @@ argument: type to filter, arrows to move, Enter to pick.
 
 Keys: Enter send · Shift+Enter / Ctrl+J newline · Esc interrupt or dismiss
 Tab complete commands, arguments, and paths · Shift+Tab previous choice
-@path in a prompt attaches that file for the model
+@path in a prompt attaches that file for the model · a large paste shows as
+[Pasted text #1 +N lines] and is sent in full; Alt+E expands it for editing
 Ctrl+R show thinking · Ctrl+O expand tool output · Ctrl+T toggle the plan
 Ctrl+L redraw the screen (if it ever looks garbled)
 Scroll: mouse wheel · PgUp/PgDn half page · Shift+Up/Down one line

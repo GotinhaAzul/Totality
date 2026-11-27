@@ -7,6 +7,17 @@ release may change defaults when the change is called out below.
 
 ## [Unreleased]
 
+### Fixed
+
+- Pasting text whose lines end in a lone CR (tmux's `paste-buffer`, some
+  terminals, old Mac text) keeps every line instead of only the last (#195).
+
+### Added
+
+- A paste over eight lines or 1000 characters shows as a `[Pasted text #1
+  +120 lines]` chip in the prompt; the full text is sent and kept in history,
+  and `Alt+E` expands it for editing (#195).
+
 ### Changed
 
 - `/approve` is now `/permissions approve`, next to the other permission
