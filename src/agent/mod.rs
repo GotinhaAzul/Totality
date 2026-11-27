@@ -121,6 +121,10 @@ pub struct Core {
     /// `NO_VERIFY`, `READ_FIRST`, `gate_block`). Reported in the `--json`
     /// `done` event so harness overhead can be measured.
     pub gate_errors: Arc<Mutex<std::collections::BTreeMap<String, u32>>>,
+    /// Messages the user sent while a turn runs. The loop delivers them as
+    /// user messages after the current tool batch, before the next model
+    /// request; a frontend may take back ones not yet delivered.
+    pub steering: Arc<Mutex<std::collections::VecDeque<String>>>,
 }
 
 /// One-time endpoint bring-up that outlives the launch path. The TUI opens
@@ -207,6 +211,34 @@ impl WindowSource {
 }
 
 impl Core {
+    /// Queue a message for the running turn (see [`Core::steering`]).
+    pub fn steer(&self, text: String) {
+        if let Ok(mut queue) = self.steering.lock() {
+            queue.push_back(text);
+        }
+    }
+
+    /// Take every queued message, oldest first.
+    pub fn take_steering(&self) -> Vec<String> {
+        self.steering
+            .lock()
+            .map(|mut queue| queue.drain(..).collect())
+            .unwrap_or_default()
+    }
+
+    /// Messages queued and not yet delivered, oldest first.
+    pub fn queued_steering(&self) -> Vec<String> {
+        self.steering
+            .lock()
+            .map(|queue| queue.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Take back the newest undelivered message, for editing.
+    pub fn unqueue_last(&self) -> Option<String> {
+        self.steering.lock().ok()?.pop_back()
+    }
+
     /// A model is selected. The harness can start without one; `/login` sets it.
     pub fn logged_in(&self) -> bool {
         !self.provider.model().trim().is_empty()
@@ -370,6 +402,8 @@ pub enum AgentEvent {
         approval_required: bool,
     },
     Notice(String),
+    /// A message the user queued mid-turn was delivered to the model.
+    Steered(String),
     /// The model call failed after streaming part of a reply and is being
     /// sent again: the last `chars` characters of streamed text were
     /// discarded and will not be part of the answer.

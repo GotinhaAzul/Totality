@@ -30,6 +30,7 @@ pub fn event_name(event: &AgentEvent) -> &'static str {
         AgentEvent::Provenance { .. } => "provenance",
         AgentEvent::HunkReview { .. } => "hunk_review",
         AgentEvent::Notice(_) => "notice",
+        AgentEvent::Steered(_) => "steered",
         AgentEvent::Discard { .. } => "discard",
         AgentEvent::Guard { .. } => "guard",
         AgentEvent::Error { .. } => "error",
@@ -109,6 +110,7 @@ pub fn event_json(event: &AgentEvent) -> Value {
                 .collect::<Vec<_>>(),
         }),
         AgentEvent::Notice(message) => json!({"message": message}),
+        AgentEvent::Steered(text) => json!({"text": text}),
         AgentEvent::Discard { chars } => json!({"chars": chars}),
         AgentEvent::Guard { code, message } => json!({"code": code, "message": message}),
         AgentEvent::Error {

@@ -23,6 +23,14 @@ release may change defaults when the change is called out below.
 
 ### Added
 
+- Messages typed while a turn runs are queued instead of refused (#196): they
+  show as `queued` after the live turn and reach the model as user messages
+  after the current tool batch, before the next request; the stall ledger,
+  checkpoint allowance, and gate retries treat them as new intent. Up on an
+  empty prompt takes the newest queued message back; a queue left when the
+  turn finishes becomes the next prompt, and one left by a cancelled turn
+  returns to the prompt. `--json` emits a `steered` event.
+
 - Richer permission answers (#194): **session: `cargo test *`** allows a
   family of calls (command prefix, fetch site, or edit directory) for the
   rest of the session, in memory only; typing a message and pressing Enter

@@ -669,6 +669,7 @@ pub async fn create_runtime(
         reviewer: Default::default(),
         permissions,
         gate_errors: Default::default(),
+        steering: Default::default(),
     };
 
     Ok(Runtime {
@@ -1011,6 +1012,7 @@ pub async fn rebuild_core(old: &Arc<Core>, mut config: Config) -> Result<Arc<Cor
         reviewer: std::sync::RwLock::new(old.reviewer()),
         permissions,
         gate_errors: Default::default(),
+        steering: Default::default(),
         // Endpoint bring-up is not retried on `/model` or `/login`; only a
         // still-running bring-up for the same target carries over.
         startup: if same_target {
