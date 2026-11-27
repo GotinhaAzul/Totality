@@ -609,9 +609,30 @@ allow does not undo a `git push` deny. The network classifier is a heuristic;
 
 A denied call returns `[DENIED]` with the rule id to the model and the turn
 continues. In the TUI an `ask` shows the exact command or path, with a diff for
-file edits; `y` allows, `n` or `Esc` denies. An approval covers exactly that
-command or path for the rest of the session: approving `git push origin main`
-does not approve `git push origin main --force`. Headless runs cannot ask, so
+file edits, and a numbered list of answers in the footer: **yes** (this exact
+call), **session: `<pattern>`** (allow a family of calls for the rest of the
+session), **always** (when a rule is suggested, below), and **no**. Up/Down and
+Enter pick, as do the number keys. `y`/`n`/`s`/`a` also answer, but only as the
+first key on an empty prompt once the question has been up for a moment, so a
+sentence you were typing when it appeared goes into the prompt instead of
+approving anything. Typing a message adds **no + send message**, which becomes
+Enter's default: the call is denied and your message goes into the tool result
+the model sees, so it knows what to do instead. `Esc` denies and keeps the
+draft. An exact approval covers exactly that command or path for the rest of
+the session: approving `git push origin main` does not approve `git push origin
+main --force`.
+
+**Session patterns** are built from the call being asked about: a command's
+leading words (`cargo test *` from `cargo test -p a`; a word starting with `-`
+or containing a path ends the prefix), a fetch's site (`fetch
+https://docs.rs/*`), or the directory a file change touches (`file changes
+under src/ui/`). A command pattern never matches a command with shell
+operators (`;`, `&`, `|`, `` ` ``, `$(`, `>`, `<`, newlines), and none is
+offered for such a command, for `VAR=value cmd`, or for `./script`. Patterns
+only turn an `ask` into an allow: deny rules, guards, and the other levels are
+unchanged. They live in memory; `/permissions rules` lists them (numbered)
+next to the saved rules, and `/permissions forget <n|all>` removes them
+(`all` also drops this session's exact approvals). Headless runs cannot ask, so
 an `ask` is denied there; use `--mode accept-edits`, allow rules, `--skip-ask`,
 or `--yolo`. A provenance approval cannot be given there either: the call is
 denied and the model is told to stop and report it; only `--yolo` runs it.
@@ -620,7 +641,7 @@ ACP forwards the question to the editor.
 **Repeated approvals become a rule.** The harness counts your approvals of
 each exact `bash`/`bg` command per project (`approvals.json` in the data
 directory). From the third ask on, the prompt shows a ready-made rule for that
-exact command, and `a` allows the call and appends the rule to the global
+exact command, and **always** (or `a`) allows the call and appends the rule to the global
 config:
 
 ```toml

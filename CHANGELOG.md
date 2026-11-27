@@ -9,6 +9,12 @@ release may change defaults when the change is called out below.
 
 ### Fixed
 
+- Typing while a permission question is open no longer drops the text, and a
+  `y` or `n` in a sentence no longer answers it (#193). Keys go to the
+  prompt; the question is answered by Up/Down + Enter or the number keys, and
+  a bare `y`/`n` counts only as the first key on an empty prompt after the
+  question has been up for 400 ms.
+
 - A permission question, warning, or other note raised during a turn renders
   below the prompt and the running tool that caused it, and stays there
   after the turn, instead of above the prompt (#200).
@@ -16,6 +22,13 @@ release may change defaults when the change is called out below.
   terminals, old Mac text) keeps every line instead of only the last (#195).
 
 ### Added
+
+- Richer permission answers (#194): **session: `cargo test *`** allows a
+  family of calls (command prefix, fetch site, or edit directory) for the
+  rest of the session, in memory only; typing a message and pressing Enter
+  denies the call and sends the message to the model as the reason.
+  `/permissions rules` lists saved rules and session patterns, and
+  `/permissions forget <n|all>` removes patterns.
 
 - A paste over eight lines or 1000 characters shows as a `[Pasted text #1
   +120 lines]` chip in the prompt; the full text is sent and kept in history,

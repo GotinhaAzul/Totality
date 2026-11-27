@@ -299,6 +299,30 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+impl App {
+    /// The transcript as plain text, laid out at 100 columns.
+    fn transcript_text(&mut self) -> String {
+        self.transcript.prepare(100, &self.theme, false);
+        self.transcript
+            .lines()
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// Pretend the open question has been on screen long enough for a bare
+/// `y`/`n` to answer it.
+fn age_question(app: &mut App) {
+    app.ask_ui.shown = Instant::now() - Duration::from_secs(2);
+}
+
 #[test]
 fn picker_filters_ranks_and_clamps_selection() {
     let models: Vec<String> = vec![
@@ -1364,28 +1388,43 @@ async fn a_permission_prompt_shows_the_exact_command_and_answers_with_y_or_n() {
                 key: format!("bash\0{subject}"),
                 call_id: String::new(),
                 suggestion: None,
+                session_rule: None,
             },
             reply,
         };
         (pending, answer)
     };
 
-    let (pending, answer) = ask("git push origin feature/x");
+    let (pending, _first) = ask("git push origin feature/x");
     app.show_permission_request(pending);
     let mut screen = EmulatedScreen::new(100, 30);
     screen.frame(&mut app, "ask shown");
     let shown = screen.parser.screen().contents();
     assert!(shown.contains("$ git push origin feature/x"), "{shown}");
     assert!(shown.contains("push-asks"), "{shown}");
-    assert!(shown.contains("y allow"), "{shown}");
-    // A stray key does not answer; y does.
+    assert!(shown.contains("1 yes"), "{shown}");
+    // A key the moment the question appears goes to the prompt.
+    app.handle_key(key(KeyCode::Char('y'))).await;
+    assert!(app.pending_ask.is_some());
+    assert_eq!(app.input.text(), "y");
+    app.input.set_text("");
+    // A stray key does not answer; once anything was typed, y does not either.
+    let (pending, answer) = ask("git push origin feature/x");
+    app.show_permission_request(pending);
+    age_question(&mut app);
     app.handle_key(key(KeyCode::Char('q'))).await;
     assert!(app.pending_ask.is_some());
+    app.input.set_text("");
     app.handle_key(key(KeyCode::Char('y'))).await;
+    assert!(app.pending_ask.is_some(), "y after typing is text");
+    app.input.set_text("");
+    // Enter on the highlighted "yes" answers.
+    app.handle_key(key(KeyCode::Enter)).await;
     assert_eq!(answer.await.unwrap(), crate::policy::AskAnswer::Allow);
 
     let (pending, answer) = ask("rm -rf build");
     app.show_permission_request(pending);
+    age_question(&mut app);
     app.handle_key(key(KeyCode::Char('n'))).await;
     assert_eq!(answer.await.unwrap(), crate::policy::AskAnswer::Deny);
     assert!(app.pending_ask.is_none());
@@ -1404,6 +1443,12 @@ async fn a_pending_question_takes_over_the_bottom_of_the_screen() {
             key: "bash\0cargo test --all".into(),
             call_id: String::new(),
             suggestion: None,
+            session_rule: crate::policy::SessionRule::for_call(&crate::policy::CallFacts::new(
+                "bash",
+                false,
+                &serde_json::json!({"command": "cargo test --all"}),
+                std::path::Path::new("/w"),
+            )),
         },
         reply,
     });
@@ -1415,11 +1460,14 @@ async fn a_pending_question_takes_over_the_bottom_of_the_screen() {
     assert!(activity.attention);
     assert_eq!(activity.label, "Needs you: Approve command");
     assert_eq!(activity.detail, "$ cargo test --all");
-    assert_eq!(activity.meta, "y allow · n deny");
+    assert_eq!(
+        activity.meta,
+        "▸1 yes · 2 session: cargo test * · 3 no · ↑↓ enter"
+    );
     let footer = app.footer();
     assert!(footer.status_badge);
     assert_eq!(footer.status.trim(), "WAITING FOR YOU");
-    assert_eq!(footer.hints, "y allow · n deny");
+    assert_eq!(footer.hints, activity.meta);
     assert!(app.window_title().contains("needs you: approve command"));
 
     let mut screen = EmulatedScreen::new(100, 30);
@@ -1429,6 +1477,7 @@ async fn a_pending_question_takes_over_the_bottom_of_the_screen() {
     assert!(shown.contains("WAITING FOR YOU"), "{shown}");
 
     // Answered: the bottom goes back to normal.
+    age_question(&mut app);
     app.handle_key(key(KeyCode::Char('y'))).await;
     assert_eq!(answer.await.unwrap(), crate::policy::AskAnswer::Allow);
     assert!(app.attention().is_none());
@@ -1472,6 +1521,7 @@ async fn a_suggested_rule_is_offered_and_a_saves_it_only_when_offered() {
                 key: "bash\0cargo test".into(),
                 call_id: "call_0001".into(),
                 suggestion,
+                session_rule: None,
             },
             reply,
         };
@@ -1481,9 +1531,11 @@ async fn a_suggested_rule_is_offered_and_a_saves_it_only_when_offered() {
     // Without a suggestion, `a` does not answer.
     let (pending, answer) = ask(None);
     app.show_permission_request(pending);
+    age_question(&mut app);
     app.handle_key(key(KeyCode::Char('a'))).await;
     assert!(app.pending_ask.is_some());
-    app.handle_key(key(KeyCode::Char('n'))).await;
+    app.input.set_text("");
+    app.handle_key(key(KeyCode::Esc)).await;
     assert_eq!(answer.await.unwrap(), crate::policy::AskAnswer::Deny);
 
     let suggestion = crate::policy::remember::suggest("bash", "cargo test", 2).map(Box::new);
@@ -1496,11 +1548,12 @@ async fn a_suggested_rule_is_offered_and_a_saves_it_only_when_offered() {
         shown.contains("approved this exact command 2 times"),
         "{shown}"
     );
-    assert!(shown.contains("a always"), "{shown}");
+    assert!(shown.contains("2 always"), "{shown}");
     let bar = app
         .activity()
         .expect("the question is on the activity line");
-    assert_eq!(bar.meta, "y allow · a always · n deny");
+    assert_eq!(bar.meta, "▸1 yes · 2 always · 3 no · ↑↓ enter");
+    age_question(&mut app);
     app.handle_key(key(KeyCode::Char('a'))).await;
     assert_eq!(answer.await.unwrap(), crate::policy::AskAnswer::AllowAlways);
 }
@@ -1544,6 +1597,7 @@ fn ask_text_includes_the_diff_preview() {
         key: String::new(),
         call_id: String::new(),
         suggestion: None,
+        session_rule: None,
     };
     let text = permission::ask_text(&request);
     assert!(text.starts_with("edit: src/lib.rs"), "{text}");
@@ -2089,4 +2143,92 @@ async fn up_walks_back_through_every_prompt() {
     }
     app.handle_key(key(KeyCode::Down)).await;
     assert_eq!(app.input.text(), "second");
+}
+
+#[tokio::test]
+async fn typing_during_a_question_drafts_and_can_deny_with_that_message() {
+    let (_dir, mut app) = test_app().await;
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let request = crate::policy::AskRequest {
+        tool: "bash".into(),
+        subject: "touch new.txt".into(),
+        preview: None,
+        rule: None,
+        key: "bash\0touch new.txt".into(),
+        call_id: String::new(),
+        suggestion: None,
+        session_rule: None,
+    };
+    app.show_permission_request(permission::PendingAsk { request, reply });
+    age_question(&mut app);
+    // Ordinary prose full of y and n lands in the prompt.
+    for ch in "why not use the existing file".chars() {
+        app.handle_key(key(KeyCode::Char(ch))).await;
+    }
+    assert!(app.pending_ask.is_some());
+    assert_eq!(app.input.text(), "why not use the existing file");
+    // With a draft, Enter's default is "no, and send my message".
+    assert!(
+        app.permission_keys().contains("▸4 no + send message")
+            || app.permission_keys().contains("▸3 no + send message"),
+        "{}",
+        app.permission_keys()
+    );
+    app.handle_key(key(KeyCode::Enter)).await;
+    assert_eq!(
+        answer.await.unwrap(),
+        crate::policy::AskAnswer::DenyWithNote("why not use the existing file".into())
+    );
+    assert!(app.input.is_empty());
+}
+
+#[tokio::test]
+async fn arrows_pick_the_session_pattern_and_later_matching_calls_skip_the_question() {
+    let (_dir, mut app) = test_app().await;
+    let facts = |command: &str| {
+        crate::policy::CallFacts::new(
+            "bash",
+            false,
+            &serde_json::json!({ "command": command }),
+            std::path::Path::new("/w"),
+        )
+    };
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let request = crate::policy::AskRequest {
+        tool: "bash".into(),
+        subject: "cargo test -p a".into(),
+        preview: None,
+        rule: None,
+        key: "bash\0cargo test -p a".into(),
+        call_id: String::new(),
+        suggestion: None,
+        session_rule: crate::policy::SessionRule::for_call(&facts("cargo test -p a")),
+    };
+    app.show_permission_request(permission::PendingAsk { request, reply });
+    app.handle_key(key(KeyCode::Down)).await;
+    assert!(app.permission_keys().contains("▸2 session: cargo test *"));
+    app.handle_key(key(KeyCode::Enter)).await;
+    assert_eq!(
+        answer.await.unwrap(),
+        crate::policy::AskAnswer::AllowSession
+    );
+
+    // The agent side applies it (as `authorize::confirm` does).
+    let permissions = &app.core().unwrap().permissions;
+    permissions.allow_for_session(
+        crate::policy::SessionRule::for_call(&facts("cargo test -p a")).unwrap(),
+    );
+    let (decision, layer) = permissions.decide_explained(&facts("cargo test -p b"));
+    assert_eq!(decision, crate::policy::Decision::Allow);
+    assert_eq!(layer, "session rule cargo test *");
+    assert!(matches!(
+        permissions.decide(&facts("cargo build")),
+        crate::policy::Decision::Ask(_)
+    ));
+
+    app.run_command("/permissions rules").await;
+    let shown = app.transcript_text();
+    assert!(shown.contains("1. cargo test *"), "{shown}");
+    app.run_command("/permissions forget 1").await;
+    assert!(app.core().unwrap().permissions.session_rules().is_empty());
 }

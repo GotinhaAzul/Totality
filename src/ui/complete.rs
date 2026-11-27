@@ -509,6 +509,11 @@ fn complete_argument(
                 "approve",
                 "allow the next sensitive action after a provenance warning",
             ),
+            Candidate::new(
+                "rules",
+                "list saved rules and this session's allow patterns",
+            ),
+            Candidate::new("forget", "remove a session allow pattern: forget <n|all>"),
         ],
         ("pr", []) => vec![
             Candidate::new("confirm", "carry out the pending pull request action"),
@@ -745,7 +750,9 @@ mod tests {
                 "skip-ask",
                 "yolo",
                 "why",
-                "approve"
+                "approve",
+                "rules",
+                "forget"
             ]
         );
     }
