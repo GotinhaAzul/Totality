@@ -247,10 +247,16 @@ write leaves the change active for the session and shows a warning.
 
 ### `/settings`
 
-`/settings` opens one filterable list of every scalar key in this file, each
-with its current value and what it does. Enter toggles a boolean, opens a
+`/settings` opens a full-screen view of every scalar key in this file. Tabs
+across the top group them (Behavior, Model, Appearance, Budgets, Prompt,
+Tools, Session, Files), the tab's sections are listed on the left, and the
+keys with their current values sit on the right under section headings; the
+line below says what the highlighted key does, when a change takes effect,
+and why the saved value may not be the one in use (an environment variable or
+the project config overriding it). Left/Right switch tabs, Tab jumps to the
+next section, and typing searches every tab. Enter toggles a boolean, opens a
 value list for a fixed choice, or puts `/settings <key> <current value>` in
-the prompt to edit; after a change the list opens again on the same key.
+the prompt to edit; after a change the view opens again on the same key.
 `ui.theme`, `model.model`, and `default_profile` go through `/theme`, `/model`,
 and `/profile`. Secrets are never shown, only `(set)` or `(empty)`.
 

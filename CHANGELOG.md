@@ -59,6 +59,12 @@ release may change defaults when the change is called out below.
 
 ### Changed
 
+- `/settings` is a full-screen view: category tabs across the top, the tab's
+  sections on the left, keys and values grouped under section headings, a
+  description line with when a change applies and what overrides it, and a
+  key-hint footer. Left/Right switch tabs, Tab jumps sections, typing
+  searches every tab.
+
 - Prompt editing (#199): Up/Down keep walking history while the recalled
   entry is unedited (Up used to stop at the newest prompt); **Ctrl+R now
   searches prompt history**, so the thinking toggle moves to **Ctrl+T** and
