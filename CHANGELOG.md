@@ -9,6 +9,9 @@ release may change defaults when the change is called out below.
 
 ### Fixed
 
+- A permission question, warning, or other note raised during a turn renders
+  below the prompt and the running tool that caused it, and stays there
+  after the turn, instead of above the prompt (#200).
 - Pasting text whose lines end in a lone CR (tmux's `paste-buffer`, some
   terminals, old Mac text) keeps every line instead of only the last (#195).
 
