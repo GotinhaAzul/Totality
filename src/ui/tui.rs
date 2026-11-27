@@ -122,7 +122,7 @@ pub(crate) fn runs_during_turn(line: &str) -> bool {
     };
     match name {
         "help" | "quit" | "debug" => true,
-        "permissions" => matches!(rest, "approve" | "why"),
+        "permissions" => matches!(rest, "approve" | "why" | "rules") || rest.starts_with("forget"),
         "trust" => rest != "confirm",
         _ => false,
     }
@@ -155,7 +155,7 @@ fn command_usage(name: &str) -> &'static str {
         "pr" => "/pr [confirm|cancel]   (no argument: show the pending action)",
         "plan" => "/plan [approve|exit]   (no argument: enter plan mode, or show the plan)",
         "permissions" => {
-            "/permissions [normal|accept-edits|deny-all|skip-ask|yolo|why|approve]   (no argument: pick; why: what decided the last calls; approve: the next sensitive action after a provenance warning)"
+            "/permissions [normal|accept-edits|deny-all|skip-ask|yolo|why|approve|rules|forget <n|all>]   (no argument: pick; why: what decided the last calls; approve: the next sensitive action after a provenance warning; rules: saved rules and session patterns; forget: drop a session pattern)"
         }
         "export" => "/export [path]",
         _ => "",
@@ -167,7 +167,7 @@ Commands: /help [command] /quit /login [endpoint] [model] [api-key] /model [name
 [model-profile] /profile [name] /theme [name|save] /settings [key [value]] /tree /rewind [turns] [force] /fork /new
 /resume [id|last] /sessions /compact /tools /mcp
 /commit [confirm|cancel|edit <message>] /pr [confirm|cancel] /plan [approve|exit]
-/permissions [normal|accept-edits|deny-all|skip-ask|yolo|why|approve]
+/permissions [normal|accept-edits|deny-all|skip-ask|yolo|why|approve|rules|forget]
 /skill [name] /workflow [name] /sec [...] /trust [confirm] /export [path]
 /clear /debug
 A command that chooses from a list opens a picker when run without an
@@ -512,6 +512,8 @@ struct App {
     repaint: bool,
     /// A permission question from the running turn, waiting for y/n.
     pending_ask: Option<permission::PendingAsk>,
+    /// Selection and timing for the open question.
+    ask_ui: permission::AskUi,
     /// A level waiting for the one-key confirmation (`skip-ask`, `yolo`).
     pending_mode_confirm: Option<crate::policy::PermissionMode>,
     /// The attention the bell last rang for.
@@ -621,6 +623,7 @@ impl App {
             hunk_edit: None,
             repaint: false,
             pending_ask: None,
+            ask_ui: permission::AskUi::default(),
             pending_mode_confirm: None,
             attention_rung: None,
             title: String::new(),
@@ -1147,6 +1150,8 @@ impl App {
         let blocked = self.attention().is_some_and(|attention| attention.blocking);
         self.input.set_placeholder(if self.hunk_edit.is_some() {
             "editing hunk · Enter saves · Esc cancels"
+        } else if self.pending_ask.is_some() {
+            "↑↓ Enter answer · or type a message to deny and tell the model"
         } else if blocked {
             "keys answer the question above · the agent waits for you"
         } else if busy {

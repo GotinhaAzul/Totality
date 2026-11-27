@@ -4988,7 +4988,7 @@ impl RecordingAsker {
 impl Asker for RecordingAsker {
     async fn ask(&self, request: AskRequest) -> AskAnswer {
         self.asked.lock().unwrap().push(request);
-        self.answer
+        self.answer.clone()
     }
 }
 

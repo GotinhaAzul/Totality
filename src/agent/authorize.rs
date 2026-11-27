@@ -287,12 +287,36 @@ pub async fn confirm(
             log_answer(core, &asked, true, layer);
             Ok(())
         }
+        AskAnswer::AllowSession => {
+            core.permissions.approve(&key);
+            crate::policy::remember::record_approval(&core.paths, &key);
+            let layer = match asked.session_rule.clone() {
+                Some(rule) => {
+                    let layer = format!("you (session rule {})", rule.label());
+                    core.permissions.allow_for_session(rule);
+                    layer
+                }
+                None => "you".to_string(),
+            };
+            log_answer(core, &asked, true, layer);
+            Ok(())
+        }
         AskAnswer::Deny => {
             log_answer(core, &asked, false, "you");
             Err(ToolResult::err(
                 "DENIED",
                 format!(
                     "the user declined {tool} ({subject}). The call did not run; try a different approach or ask the user what they want instead."
+                ),
+            ))
+        }
+        AskAnswer::DenyWithNote(note) => {
+            log_answer(core, &asked, false, "you (with a note)");
+            Err(ToolResult::err(
+                "DENIED",
+                format!(
+                    "the user declined {tool} ({subject}). The call did not run. The user says what to do instead:\n{}",
+                    note.trim()
                 ),
             ))
         }

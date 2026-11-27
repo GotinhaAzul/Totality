@@ -581,6 +581,50 @@ impl App {
             self.approve_provenance();
             return;
         }
+        if argument == "rules" {
+            let Some(core) = self.core().cloned() else {
+                return;
+            };
+            let text = permission_rules_text(
+                &core.permissions.policy().summaries(),
+                &core.permissions.session_rules(),
+                &core.paths.config_file(),
+            );
+            self.transcript
+                .push_note("permissions · rules".to_string(), text, false);
+            self.transcript.scroll_end();
+            return;
+        }
+        if let Some(which) = argument.strip_prefix("forget") {
+            let Some(core) = self.core().cloned() else {
+                return;
+            };
+            let which = which.trim();
+            if which == "all" {
+                let count = core.permissions.forget_session_approvals();
+                self.set_notice(
+                    format!("forgot {count} session pattern(s) and every approval this session"),
+                    Role::Success,
+                );
+                return;
+            }
+            match which
+                .parse::<usize>()
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|index| core.permissions.forget_session_rule(index))
+            {
+                Some(rule) => self.set_notice(
+                    format!("no longer allowed this session: {}", rule.label()),
+                    Role::Success,
+                ),
+                None => self.set_notice(
+                    "usage: /permissions forget <n|all> (numbers from /permissions rules)",
+                    Role::Error,
+                ),
+            }
+            return;
+        }
         if argument == "why" {
             let Some(core) = self.core().cloned() else {
                 return;
@@ -593,7 +637,7 @@ impl App {
         }
         let Some(mode) = PermissionMode::parse(argument) else {
             self.set_notice(
-                "permissions: normal, accept-edits, deny-all, skip-ask, yolo, why, or approve",
+                "permissions: normal, accept-edits, deny-all, skip-ask, yolo, why, approve, rules, or forget <n|all>",
                 Role::Error,
             );
             return;
@@ -2080,6 +2124,33 @@ const WHY_CALLS: usize = 15;
 
 /// The last calls that needed a decision (read-only calls are always allowed
 /// and left out), newest last, each with the layer that decided it.
+/// `/permissions rules`: saved rules (read-only here; edit the config to
+/// change them) and the session's allow patterns, numbered for `forget`.
+pub(super) fn permission_rules_text(
+    saved: &[(String, &'static str, String)],
+    session: &[crate::policy::SessionRule],
+    config: &Path,
+) -> String {
+    let mut text = String::from("This session (in memory; /permissions forget <n|all>):\n");
+    if session.is_empty() {
+        text.push_str("  none yet. Pick \"allow … for this session\" when asked.\n");
+    }
+    for (index, rule) in session.iter().enumerate() {
+        text.push_str(&format!("  {}. {}\n", index + 1, rule.label()));
+    }
+    text.push_str(&format!(
+        "\nSaved rules ([[permissions.rules]], first match wins; edit {}):\n",
+        config.display()
+    ));
+    if saved.is_empty() {
+        text.push_str("  none\n");
+    }
+    for (id, action, matches) in saved {
+        text.push_str(&format!("  {action:<5} {id}: {matches}\n"));
+    }
+    text.trim_end().to_string()
+}
+
 pub(super) fn permission_log_text(log: &[crate::policy::LoggedDecision]) -> String {
     let shown: Vec<&crate::policy::LoggedDecision> =
         log.iter().filter(|entry| !entry.read_only).collect();

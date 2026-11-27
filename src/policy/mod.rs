@@ -12,6 +12,9 @@
 
 pub mod command;
 pub mod remember;
+pub mod session;
+
+pub use session::SessionRule;
 
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;
@@ -374,16 +377,33 @@ pub struct AskRequest {
     /// A ready-made allow rule, offered after the user approved this exact
     /// command in earlier sessions ([`remember`]).
     pub suggestion: Option<Box<remember::Suggestion>>,
+    /// The allow-for-this-session pattern the frontend may offer.
+    pub session_rule: Option<SessionRule>,
 }
 
 /// The user's answer to an [`AskRequest`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AskAnswer {
     Allow,
     /// Allow, and save the request's suggested rule so later sessions do not
     /// ask again.
     AllowAlways,
+    /// Allow, and allow the request's session pattern for the rest of the
+    /// session (kept in memory only).
+    AllowSession,
     Deny,
+    /// Deny, and tell the model what to do instead; the note goes into the
+    /// tool result it sees.
+    DenyWithNote(String),
+}
+
+impl AskAnswer {
+    pub fn allows(&self) -> bool {
+        matches!(
+            self,
+            AskAnswer::Allow | AskAnswer::AllowAlways | AskAnswer::AllowSession
+        )
+    }
 }
 
 /// A frontend that can ask the user about one call (the TUI).
@@ -511,6 +531,34 @@ impl Policy {
         })
     }
 
+    /// Each configured rule as `(id, action, what it matches)`, in order.
+    pub fn summaries(&self) -> Vec<(String, &'static str, String)> {
+        self.rules
+            .iter()
+            .map(|rule| {
+                let mut parts = Vec::new();
+                if let Some(tool) = &rule.tool {
+                    parts.push(format!("tool {}", tool.glob().glob()));
+                }
+                if let Some(path) = &rule.path {
+                    parts.push(format!("path {}", path.glob().glob()));
+                }
+                if let Some(command) = &rule.command {
+                    parts.push(format!("command /{}/", command.as_str()));
+                }
+                if let Some(network) = rule.network {
+                    parts.push(format!("network {network}"));
+                }
+                let action = match rule.action {
+                    RuleAction::Allow => "allow",
+                    RuleAction::Ask => "ask",
+                    RuleAction::Deny => "deny",
+                };
+                (rule.id.clone(), action, parts.join(" · "))
+            })
+            .collect()
+    }
+
     /// First 16 hex digits of SHA-256 over the rules as JSON.
     pub fn hash(&self) -> &str {
         &self.hash
@@ -615,6 +663,7 @@ impl Policy {
                     key: call.approval_key(),
                     call_id: String::new(),
                     suggestion: None,
+                    session_rule: SessionRule::for_call(call),
                 }),
             },
         }
@@ -654,6 +703,8 @@ pub struct Permissions {
     before_plan: Mutex<Option<PermissionMode>>,
     /// Exact calls the user approved this session ([`CallFacts::approval_key`]).
     approved: Mutex<HashSet<String>>,
+    /// Patterns the user allowed for the rest of the session.
+    session_rules: Mutex<Vec<SessionRule>>,
     asker: Mutex<Option<Arc<dyn Asker>>>,
     /// The last decisions and the layer that made each one.
     log: Mutex<VecDeque<LoggedDecision>>,
@@ -693,6 +744,7 @@ impl Permissions {
             mode: Mutex::new(mode),
             before_plan: Mutex::new(None),
             approved: Mutex::new(HashSet::new()),
+            session_rules: Mutex::new(Vec::new()),
             asker: Mutex::new(None),
             log: Mutex::new(VecDeque::new()),
         }
@@ -706,6 +758,7 @@ impl Permissions {
             mode: Mutex::new(self.mode()),
             before_plan: Mutex::new(*self.before_plan.lock().unwrap_or_else(|p| p.into_inner())),
             approved: Mutex::new(HashSet::new()),
+            session_rules: Mutex::new(Vec::new()),
             asker: Mutex::new(self.asker()),
             log: Mutex::new(self.log.lock().unwrap_or_else(|p| p.into_inner()).clone()),
         }
@@ -778,8 +831,57 @@ impl Permissions {
             (Decision::Ask(request), _) if self.is_approved(&request.key) => {
                 (Decision::Allow, "session approval".into())
             }
+            (Decision::Ask(request), layer) => match self.session_rule_for(call) {
+                Some(rule) => (Decision::Allow, format!("session rule {}", rule.label())),
+                None => (Decision::Ask(request), layer),
+            },
             other => other,
         }
+    }
+
+    fn session_rule_for(&self, call: &CallFacts) -> Option<SessionRule> {
+        self.session_rules
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .find(|rule| rule.matches(call))
+            .cloned()
+    }
+
+    /// Allow `rule`'s calls for the rest of the session.
+    pub fn allow_for_session(&self, rule: SessionRule) {
+        let mut rules = self.session_rules.lock().unwrap_or_else(|p| p.into_inner());
+        if !rules.contains(&rule) {
+            rules.push(rule);
+        }
+    }
+
+    /// The session's allow patterns, oldest first.
+    pub fn session_rules(&self) -> Vec<SessionRule> {
+        self.session_rules
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Remove the session pattern at `index` (as [`Permissions::session_rules`]
+    /// lists them), returning it.
+    pub fn forget_session_rule(&self, index: usize) -> Option<SessionRule> {
+        let mut rules = self.session_rules.lock().unwrap_or_else(|p| p.into_inner());
+        (index < rules.len()).then(|| rules.remove(index))
+    }
+
+    /// Remove every session pattern and exact approval; returns how many
+    /// patterns there were.
+    pub fn forget_session_approvals(&self) -> usize {
+        self.approved
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        let mut rules = self.session_rules.lock().unwrap_or_else(|p| p.into_inner());
+        let count = rules.len();
+        rules.clear();
+        count
     }
 
     /// Record a call's outcome. A later record for the same call replaces

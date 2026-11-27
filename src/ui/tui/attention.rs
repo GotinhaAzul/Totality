@@ -61,11 +61,7 @@ impl App {
         // The agent is blocked on these: answer them before anything else.
         if let Some(pending) = &self.pending_ask {
             let request = &pending.request;
-            let keys = if request.suggestion.is_some() {
-                "y allow · a always · n deny"
-            } else {
-                "y allow · n deny"
-            };
+            let keys = self.permission_keys();
             let subject = match request.tool.as_str() {
                 "bash" | "bg" => format!("$ {}", request.subject),
                 _ => request.subject.clone(),
@@ -73,7 +69,7 @@ impl App {
             return Some(Attention::new(
                 &approve_what(&request.tool),
                 subject,
-                keys,
+                &keys,
                 true,
             ));
         }

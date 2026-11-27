@@ -24,6 +24,7 @@ impl App {
     /// hunk is open for editing, where the text itself is what is edited).
     pub(super) fn handle_paste(&mut self, text: &str) {
         let text = crate::sanitize::paste(text);
+        self.ask_ui.typed = true;
         if self.hunk_edit.is_some() {
             self.input.insert_text(&text);
             return;
