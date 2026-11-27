@@ -180,7 +180,8 @@ Tab complete commands, arguments, and paths · Shift+Tab previous choice
 Ctrl+R show thinking · Ctrl+O expand tool output · Ctrl+T toggle the plan
 Ctrl+L redraw the screen (if it ever looks garbled)
 Scroll: mouse wheel · PgUp/PgDn half page · Shift+Up/Down one line
-Home/End top and bottom (prompt empty) · Ctrl+Home/End anytime · Ctrl+C quit
+Home/End top and bottom (prompt empty) · Ctrl+Home/End anytime
+Ctrl+C cancel a turn, clear the prompt, or (twice on an empty prompt) quit
 Hold Shift while dragging to select text ([ui] mouse = false disables
 mouse capture).";
 
@@ -230,6 +231,9 @@ impl Switch {
         }
     }
 }
+
+/// How soon a second Ctrl+C on an empty prompt must follow the first to quit.
+const QUIT_CONFIRM_WINDOW: Duration = Duration::from_millis(1500);
 
 /// Lines per mouse-wheel notch.
 const WHEEL_LINES: usize = 3;
@@ -509,6 +513,8 @@ struct App {
     title: String,
     /// A turn finished since the last prompt was sent.
     turn_done: bool,
+    /// When Ctrl+C on an empty prompt asked for a second press to quit.
+    quit_armed: Option<Instant>,
     /// The last frame as drawn, for tests that check the screen.
     #[cfg(test)]
     last_frame: Option<ratatui::buffer::Buffer>,
@@ -612,6 +618,7 @@ impl App {
             attention_rung: None,
             title: String::new(),
             turn_done: false,
+            quit_armed: None,
             #[cfg(test)]
             last_frame: None,
         };
