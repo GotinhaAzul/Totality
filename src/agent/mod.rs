@@ -402,6 +402,10 @@ pub enum AgentEvent {
         approval_required: bool,
     },
     Notice(String),
+    /// A notice that is also appended to the session as a harness message
+    /// (a guard nudge). The wire event is still a plain `notice`; the TUI
+    /// uses the distinction only to anchor later notes correctly.
+    RecordedNotice(String),
     /// The last lines a running tool printed (UI only; the model gets the
     /// final result).
     ToolProgress {

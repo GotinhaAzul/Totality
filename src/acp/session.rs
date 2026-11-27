@@ -413,7 +413,7 @@ impl Server {
             // render `agent_thought_chunk` separately from the message, so a
             // notice can never merge into the reply. The newlines keep
             // consecutive notices apart in clients that join chunks.
-            AgentEvent::Notice(message) => json!({
+            AgentEvent::Notice(message) | AgentEvent::RecordedNotice(message) => json!({
                 "sessionUpdate": "agent_thought_chunk",
                 "content": {"type": "text", "text": format!("\n[harness] {}\n", sanitize::display(&message))},
             }),

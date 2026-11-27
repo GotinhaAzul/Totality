@@ -2121,11 +2121,6 @@ impl App {
     }
 }
 
-/// Calls shown by `/permissions why`.
-const WHY_CALLS: usize = 15;
-
-/// The last calls that needed a decision (read-only calls are always allowed
-/// and left out), newest last, each with the layer that decided it.
 /// `/permissions rules`: saved rules (read-only here; edit the config to
 /// change them) and the session's allow patterns, numbered for `forget`.
 pub(super) fn permission_rules_text(
@@ -2141,7 +2136,7 @@ pub(super) fn permission_rules_text(
         text.push_str(&format!("  {}. {}\n", index + 1, rule.label()));
     }
     text.push_str(&format!(
-        "\nSaved rules ([[permissions.rules]], first match wins; edit {}):\n",
+        "\nSaved rules ([[permissions.rules]], last matching rule wins; edit {}):\n",
         config.display()
     ));
     if saved.is_empty() {
@@ -2153,6 +2148,11 @@ pub(super) fn permission_rules_text(
     text.trim_end().to_string()
 }
 
+/// Calls shown by `/permissions why`.
+const WHY_CALLS: usize = 15;
+
+/// The last calls that needed a decision (read-only calls are always allowed
+/// and left out), newest last, each with the layer that decided it.
 pub(super) fn permission_log_text(log: &[crate::policy::LoggedDecision]) -> String {
     let shown: Vec<&crate::policy::LoggedDecision> =
         log.iter().filter(|entry| !entry.read_only).collect();

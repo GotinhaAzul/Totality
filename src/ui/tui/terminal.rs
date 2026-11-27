@@ -18,6 +18,10 @@ pub(super) static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// reading so it cannot steal that program's keystrokes.
 pub(super) static INPUT_PAUSED: AtomicBool = AtomicBool::new(false);
 
+/// Set by the input thread once it has seen [`INPUT_PAUSED`] and is no
+/// longer inside a poll/read.
+pub(super) static INPUT_STOPPED: AtomicBool = AtomicBool::new(false);
+
 /// How long the input thread may sit in one `poll` before it rechecks
 /// [`INPUT_PAUSED`].
 pub(super) const INPUT_POLL: Duration = Duration::from_millis(50);
@@ -30,8 +34,14 @@ pub(super) fn suspend_terminal<T>(run: impl FnOnce() -> T) -> T {
         return run();
     }
     INPUT_PAUSED.store(true, Ordering::SeqCst);
-    // Let a poll already in flight return.
-    std::thread::sleep(INPUT_POLL * 2);
+    // Wait for a poll already in flight to return, rather than assuming a
+    // fixed sleep is long enough under load.
+    for _ in 0..25 {
+        if INPUT_STOPPED.load(Ordering::SeqCst) {
+            break;
+        }
+        std::thread::sleep(INPUT_POLL / 5);
+    }
     let mouse = MOUSE_CAPTURE.load(Ordering::SeqCst);
     restore_terminal();
     let result = run();
@@ -60,13 +70,23 @@ pub(super) fn external_editor() -> Option<String> {
 /// trailing newline editors add.
 pub(super) fn edit_in_editor(editor: &str, text: &str) -> Result<String> {
     let file = DraftFile::create(text)?;
-    let status = std::process::Command::new("sh")
+    let mut child = std::process::Command::new("sh")
         .arg("-c")
         .arg(format!("{editor} \"$1\""))
         .arg("tot-editor")
         .arg(file.path())
-        .status()
+        .spawn()
         .with_context(|| format!("cannot run {editor}"))?;
+    // The editor shares our foreground process group, so a Ctrl+C in it also
+    // reaches this process. Ignore SIGINT while it runs; otherwise the queued
+    // signal quits Totality as soon as the editor exits. Spawn first so the
+    // child inherits the normal disposition and Ctrl+C still works there.
+    let previous = ignore_sigint();
+    let status = child.wait();
+    if let Some(previous) = previous {
+        restore_sigint(&previous);
+    }
+    let status = status.with_context(|| format!("cannot run {editor}"))?;
     if !status.success() {
         bail!("{editor} exited with {status}; the prompt is unchanged");
     }
@@ -79,6 +99,32 @@ pub(super) fn edit_in_editor(editor: &str, text: &str) -> Result<String> {
     }
     Ok(edited)
 }
+
+/// Ignore SIGINT for this process while an external editor runs.
+#[cfg(unix)]
+fn ignore_sigint() -> Option<nix::sys::signal::SigAction> {
+    use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
+    let action = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
+    // SAFETY: sigaction only stores the action; the mask and flags are valid.
+    unsafe { sigaction(Signal::SIGINT, &action).ok() }
+}
+
+#[cfg(not(unix))]
+fn ignore_sigint() -> Option<()> {
+    None
+}
+
+#[cfg(unix)]
+fn restore_sigint(previous: &nix::sys::signal::SigAction) {
+    use nix::sys::signal::{Signal, sigaction};
+    // SAFETY: `previous` came from sigaction on this process.
+    unsafe {
+        let _ = sigaction(Signal::SIGINT, previous);
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_sigint(_previous: &()) {}
 
 pub(super) fn install_panic_hook() {
     static ONCE: Once = Once::new();

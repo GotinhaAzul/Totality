@@ -319,9 +319,6 @@ impl App {
 
 /// Pretend the open question has been on screen long enough for a bare
 /// `y`/`n` to answer it.
-fn age_question(app: &mut App) {
-    app.ask_ui.shown = Instant::now() - Duration::from_secs(2);
-}
 
 #[test]
 fn picker_filters_ranks_and_clamps_selection() {
@@ -1403,29 +1400,35 @@ async fn a_permission_prompt_shows_the_exact_command_and_answers_with_y_or_n() {
     assert!(shown.contains("$ git push origin feature/x"), "{shown}");
     assert!(shown.contains("push-asks"), "{shown}");
     assert!(shown.contains("1 yes"), "{shown}");
-    // A key the moment the question appears goes to the prompt.
+    // Bare letters are always prompt text, even long after the question
+    // appeared. No debounce can turn the start of a message into an answer.
     app.handle_key(key(KeyCode::Char('y'))).await;
     assert!(app.pending_ask.is_some());
     assert_eq!(app.input.text(), "y");
     app.input.set_text("");
-    // A stray key does not answer; once anything was typed, y does not either.
     let (pending, answer) = ask("git push origin feature/x");
     app.show_permission_request(pending);
-    age_question(&mut app);
     app.handle_key(key(KeyCode::Char('q'))).await;
     assert!(app.pending_ask.is_some());
     app.input.set_text("");
     app.handle_key(key(KeyCode::Char('y'))).await;
     assert!(app.pending_ask.is_some(), "y after typing is text");
     app.input.set_text("");
-    // Enter on the highlighted "yes" answers.
+    // The default is fail-closed: a stray Enter denies. Move up to "yes"
+    // and Enter answers the highlighted choice.
+    app.handle_key(key(KeyCode::Enter)).await;
+    assert_eq!(answer.await.unwrap(), crate::policy::AskAnswer::Deny);
+
+    let (pending, answer) = ask("rm -rf build");
+    app.show_permission_request(pending);
+    app.handle_key(key(KeyCode::Up)).await;
     app.handle_key(key(KeyCode::Enter)).await;
     assert_eq!(answer.await.unwrap(), crate::policy::AskAnswer::Allow);
 
     let (pending, answer) = ask("rm -rf build");
     app.show_permission_request(pending);
-    age_question(&mut app);
-    app.handle_key(key(KeyCode::Char('n'))).await;
+    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT))
+        .await;
     assert_eq!(answer.await.unwrap(), crate::policy::AskAnswer::Deny);
     assert!(app.pending_ask.is_none());
 }
@@ -1462,7 +1465,7 @@ async fn a_pending_question_takes_over_the_bottom_of_the_screen() {
     assert_eq!(activity.detail, "$ cargo test --all");
     assert_eq!(
         activity.meta,
-        "▸1 yes · 2 session: cargo test * · 3 no · ↑↓ enter"
+        "1 yes · 2 session: cargo test * · ▸3 no · ↑↓ enter"
     );
     let footer = app.footer();
     assert!(footer.status_badge);
@@ -1477,8 +1480,8 @@ async fn a_pending_question_takes_over_the_bottom_of_the_screen() {
     assert!(shown.contains("WAITING FOR YOU"), "{shown}");
 
     // Answered: the bottom goes back to normal.
-    age_question(&mut app);
-    app.handle_key(key(KeyCode::Char('y'))).await;
+    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::ALT))
+        .await;
     assert_eq!(answer.await.unwrap(), crate::policy::AskAnswer::Allow);
     assert!(app.attention().is_none());
     assert!(!app.footer().status_badge);
@@ -1528,11 +1531,11 @@ async fn a_suggested_rule_is_offered_and_a_saves_it_only_when_offered() {
         (pending, answer)
     };
 
-    // Without a suggestion, `a` does not answer.
+    // Without a suggestion, `Alt+a` does not answer.
     let (pending, answer) = ask(None);
     app.show_permission_request(pending);
-    age_question(&mut app);
-    app.handle_key(key(KeyCode::Char('a'))).await;
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT))
+        .await;
     assert!(app.pending_ask.is_some());
     app.input.set_text("");
     app.handle_key(key(KeyCode::Esc)).await;
@@ -1552,9 +1555,9 @@ async fn a_suggested_rule_is_offered_and_a_saves_it_only_when_offered() {
     let bar = app
         .activity()
         .expect("the question is on the activity line");
-    assert_eq!(bar.meta, "▸1 yes · 2 always · 3 no · ↑↓ enter");
-    age_question(&mut app);
-    app.handle_key(key(KeyCode::Char('a'))).await;
+    assert_eq!(bar.meta, "1 yes · 2 always · ▸3 no · ↑↓ enter");
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT))
+        .await;
     assert_eq!(answer.await.unwrap(), crate::policy::AskAnswer::AllowAlways);
 }
 
@@ -1838,7 +1841,6 @@ async fn bare_rewind_opens_a_picker_of_messages() {
 #[tokio::test]
 async fn permissions_approve_runs_while_the_model_is_working() {
     let (_dir, mut app) = test_app().await;
-    app.turn_active = true;
     let notice = |app: &App| {
         app.notice
             .as_ref()
@@ -1846,15 +1848,27 @@ async fn permissions_approve_runs_while_the_model_is_working() {
             .unwrap_or_default()
     };
 
-    // The old spelling is gone and points to the new one.
+    // Idle, the old spelling is gone and points to the new one.
     app.input.set_text("/approve");
     app.handle_key(key(KeyCode::Enter)).await;
     assert!(
-        notice(&app).contains("/permissions approve"),
+        notice(&app).contains("/approve moved: use /permissions approve"),
         "{}",
         notice(&app)
     );
+    assert!(app.input.is_empty(), "the idle command ran");
 
+    // Mid-turn the old spelling is not runnable: it stays in the prompt and
+    // only the generic busy notice is shown.
+    app.turn_active = true;
+    app.input.set_text("/approve");
+    app.handle_key(key(KeyCode::Enter)).await;
+    assert_eq!(app.input.text(), "/approve");
+    assert!(
+        notice(&app).contains("waits for the turn"),
+        "{}",
+        notice(&app)
+    );
     app.input.set_text("/permissions approve");
     app.handle_key(key(KeyCode::Enter)).await;
     assert!(app.input.is_empty(), "the command was submitted");
@@ -2078,9 +2092,10 @@ async fn settings_lists_every_key_and_saves_a_change_to_the_global_config() {
     for ch in "format.on".chars() {
         app.handle_modal_key(key(KeyCode::Char(ch))).await;
     }
-    if let Some(ModalData::Settings(list)) = &app.modal {
-        assert_eq!(list.selected_row().unwrap().key, "format.on_edit");
-    }
+    let Some(ModalData::Settings(list)) = &app.modal else {
+        panic!("typing must keep the settings screen open");
+    };
+    assert_eq!(list.selected_row().unwrap().key, "format.on_edit");
     app.handle_modal_key(key(KeyCode::Enter)).await;
     assert!(!app.config.format.on_edit);
     assert!(
@@ -2088,9 +2103,10 @@ async fn settings_lists_every_key_and_saves_a_change_to_the_global_config() {
     );
     // Right switches tabs.
     app.handle_modal_key(key(KeyCode::Right)).await;
-    if let Some(ModalData::Settings(list)) = &app.modal {
-        assert_eq!(crate::ui::settings_view::TABS[list.tab], "Model");
-    }
+    let Some(ModalData::Settings(list)) = &app.modal else {
+        panic!("Right must keep the settings screen open");
+    };
+    assert_eq!(crate::ui::settings_view::TABS[list.tab], "Model");
 
     app.modal = None;
     app.run_command("/settings where").await;
@@ -2192,7 +2208,9 @@ async fn typing_during_a_question_drafts_and_can_deny_with_that_message() {
         session_rule: None,
     };
     app.show_permission_request(permission::PendingAsk { request, reply });
-    age_question(&mut app);
+    // Move the selection first, then type: the draft takes Enter back to
+    // "no + send message" instead of silently allowing the highlighted item.
+    app.handle_key(key(KeyCode::Down)).await;
     // Ordinary prose full of y and n lands in the prompt.
     for ch in "why not use the existing file".chars() {
         app.handle_key(key(KeyCode::Char(ch))).await;
@@ -2237,7 +2255,9 @@ async fn arrows_pick_the_session_pattern_and_later_matching_calls_skip_the_quest
         session_rule: crate::policy::SessionRule::for_call(&facts("cargo test -p a")),
     };
     app.show_permission_request(permission::PendingAsk { request, reply });
-    app.handle_key(key(KeyCode::Down)).await;
+    // The default is the fail-closed "no" (choice 3); Up reaches the session
+    // pattern (choice 2).
+    app.handle_key(key(KeyCode::Up)).await;
     assert!(app.permission_keys().contains("▸2 session: cargo test *"));
     app.handle_key(key(KeyCode::Enter)).await;
     assert_eq!(

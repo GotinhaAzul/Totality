@@ -918,7 +918,7 @@ async fn run_loop(
                 if progress.output_recoveries < MAX_OUTPUT_RECOVERIES {
                     progress.output_recoveries += 1;
                     append_error(&core.session, &code, &err.message, true);
-                    let _ = tx.send(AgentEvent::Notice(format!(
+                    let _ = tx.send(AgentEvent::RecordedNotice(format!(
                         "the model's tool call was cut off by the output token limit; asking it to split the call into smaller steps ({}/{MAX_OUTPUT_RECOVERIES})",
                         progress.output_recoveries
                     )));
@@ -1483,10 +1483,14 @@ async fn run_loop(
             if let Err(err) = append_user(&core.session, reminder) {
                 return TurnOutcome::error("session_write", err.to_string());
             }
-            let _ = tx.send(AgentEvent::Notice(reminder.into()));
+            let _ = tx.send(AgentEvent::RecordedNotice(reminder.into()));
         }
 
-        if batch.cancelled {
+        // A cancel can arrive while the tool runs without setting
+        // `batch.cancelled` (the batch only checks at call boundaries). Stop
+        // before taking steering, so a queued message is not consumed by a
+        // turn that is already ending; the TUI restores it to the prompt.
+        if batch.cancelled || cancel.is_cancelled() {
             append_error(
                 &core.session,
                 "cancelled",
@@ -1534,11 +1538,67 @@ async fn run_loop(
             return TurnOutcome::ok(TurnStatus::Done);
         }
         // Messages the user sent while the batch ran steer the next request.
+        // They are real user messages: resolve @path attachments and run the
+        // user_prompt hook just like the turn's opening message.
         let steered = core.take_steering();
         if !steered.is_empty() {
-            for text in steered {
-                if let Err(err) = append_user(&core.session, &text) {
+            let attachment_budget = budget.chars_for(budget.usable_prompt() / 4);
+            let mut pending = steered.into_iter();
+            while let Some(text) = pending.next() {
+                let mentions = super::mentions::resolve_with(
+                    &core.tool_context(),
+                    &text,
+                    attachment_budget,
+                    core.config.prompt.attach_named_files,
+                )
+                .await;
+                if !mentions.attachments.is_empty() {
+                    let names: Vec<String> = mentions
+                        .attachments
+                        .iter()
+                        .map(
+                            |attachment| match (&attachment.image, &attachment.described_by) {
+                                (Some(image), Some(model)) => {
+                                    format!(
+                                        "{} ({}, described by {model})",
+                                        attachment.path,
+                                        image.summary()
+                                    )
+                                }
+                                (Some(image), None) => {
+                                    format!("{} ({})", attachment.path, image.summary())
+                                }
+                                _ => attachment.path.clone(),
+                            },
+                        )
+                        .collect();
+                    let _ = tx.send(AgentEvent::Notice(format!("attached {}", names.join(", "))));
+                }
+                for skipped in &mentions.skipped {
+                    let _ = tx.send(AgentEvent::Notice(format!("not attached: {skipped}")));
+                }
+                if let Err(err) = append_user_with(&core.session, &text, mentions.attachments) {
                     return TurnOutcome::error("session_write", err.to_string());
+                }
+                let prompt_hooks = crate::hooks::user_prompt(&hook_env(core.as_ref()), &text).await;
+                hook_notices(tx, &prompt_hooks);
+                if let Some(block) = prompt_hooks.blocked {
+                    let message = format!(
+                        "hook {:?} blocked this steer: {}. The model was not called.",
+                        block.hook, block.reason
+                    );
+                    append_error(&core.session, "hook_block", &message, false);
+                    let _ = tx.send(AgentEvent::Error {
+                        code: "hook_block".into(),
+                        message,
+                        recoverable: false,
+                    });
+                    // Put it and anything behind it back for the prompt.
+                    core.steer(text);
+                    for rest in pending {
+                        core.steer(rest);
+                    }
+                    return TurnOutcome::ok(TurnStatus::Blocked);
                 }
                 let _ = tx.send(AgentEvent::Steered(text));
             }
@@ -3433,9 +3493,16 @@ async fn execute_batch(
                                             } else {
                                                 Duration::ZERO
                                             };
-                                            result = match tokio::time::timeout(grace, &mut timed).await {
-                                                Ok(Ok(result)) => result,
-                                                _ => ToolResult::err("cancelled", "cancelled during execution"),
+                                            result = if grace.is_zero() {
+                                                // Do not poll the tool once more: timeout(0)
+                                                // would still poll it and could record a
+                                                // side effect after the cancel.
+                                                ToolResult::err("cancelled", "cancelled during execution")
+                                            } else {
+                                                match tokio::time::timeout(grace, &mut timed).await {
+                                                    Ok(Ok(result)) => result,
+                                                    _ => ToolResult::err("cancelled", "cancelled during execution"),
+                                                }
                                             };
                                         }
                                         outcome = &mut timed => {

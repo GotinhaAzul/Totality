@@ -51,8 +51,10 @@ impl App {
             self.settings_show(setting);
             return;
         }
-        self.settings_set(setting, value).await;
-        if from_picker {
+        // Reopen only when the change was saved; a failed save must leave the
+        // warning visible on the normal screen instead of behind the view.
+        let saved = self.settings_set(setting, value).await;
+        if from_picker && saved {
             self.open_settings_list(setting.key);
         }
     }
@@ -198,19 +200,19 @@ impl App {
 
     /// Validate, apply to the running session, then save to the global
     /// config. Nothing is saved when the value cannot be applied.
-    async fn settings_set(&mut self, setting: &'static Setting, raw: &str) {
+    async fn settings_set(&mut self, setting: &'static Setting, raw: &str) -> bool {
         let value = match settings::parse(setting, raw, &self.config) {
             Ok(value) => value,
             Err(error) => {
                 self.set_notice(error.to_string(), Role::Error);
-                return;
+                return false;
             }
         };
         let next = match settings::with_value(&self.config, setting, value.clone()) {
             Ok(next) => next,
             Err(error) => {
                 self.set_notice(format!("{}: {error:#}", setting.key), Role::Error);
-                return;
+                return false;
             }
         };
         match setting.apply {
@@ -235,7 +237,7 @@ impl App {
                         format!("{}: not applied, not saved: {error:#}", setting.key),
                         Role::Error,
                     );
-                    return;
+                    return false;
                 }
             }
             Apply::Permission => {
@@ -247,7 +249,7 @@ impl App {
             }
         }
         let Some(path) = self.core().map(|core| core.paths.config_file()) else {
-            return;
+            return false;
         };
         let applied = settings::display(setting, settings::current(&self.config, setting).as_ref());
         match Config::save_key(&path, setting.key, value, setting.is_secret()) {
@@ -269,14 +271,18 @@ impl App {
                     Role::Warning
                 };
                 self.set_notice(notice, role);
+                true
             }
-            Err(error) => self.set_notice(
-                format!(
-                    "{} = {applied} for this session; not saved: {error:#}",
-                    setting.key
-                ),
-                Role::Warning,
-            ),
+            Err(error) => {
+                self.set_notice(
+                    format!(
+                        "{} = {applied} for this session; not saved: {error:#}",
+                        setting.key
+                    ),
+                    Role::Warning,
+                );
+                false
+            }
         }
     }
 
