@@ -2890,6 +2890,12 @@ fn guard_args(name: &str, args: &Value) -> Value {
     args
 }
 
+/// Tools that end their own work on cancel and return a partial result.
+const CANCEL_AWARE_TOOLS: &[&str] = &["bash"];
+/// How long a cancel-aware tool gets to stop and report (bash: SIGTERM, a
+/// 2 s grace, SIGKILL, then draining its pipes).
+const CANCEL_GRACE: Duration = Duration::from_secs(8);
+
 #[allow(clippy::too_many_arguments, clippy::unnecessary_unwrap)]
 async fn execute_batch(
     core: &std::sync::Arc<Core>,
@@ -3395,22 +3401,47 @@ async fn execute_batch(
                                             }
                                         }
                                     };
+                                    // The frontend gets a live tail of
+                                    // what the call prints.
+                                    let fut = crate::tools::live::with_sink(
+                                        crate::tools::live::LiveSink {
+                                            call_id: call.id.clone(),
+                                            tx: tx.clone(),
+                                        },
+                                        fut,
+                                    );
+                                    let timed = tokio::time::timeout(core.tool_timeout, fut);
+                                    tokio::pin!(timed);
+                                    let timeout_result = || {
+                                        ToolResult::err(
+                                            "timeout",
+                                            format!(
+                                                "{} exceeded {} s; narrow the call or use bg for long work",
+                                                call.name,
+                                                core.tool_timeout.as_secs()
+                                            ),
+                                        )
+                                    };
                                     tokio::select! {
                                         biased;
                                         _ = cancel.cancelled() => {
-                                            result = ToolResult::err("cancelled", "cancelled during execution");
+                                            // `bash` stops its process group
+                                            // itself and returns what it
+                                            // printed; give it that long.
+                                            let grace = if CANCEL_AWARE_TOOLS.contains(&call.name.as_str()) {
+                                                CANCEL_GRACE
+                                            } else {
+                                                Duration::ZERO
+                                            };
+                                            result = match tokio::time::timeout(grace, &mut timed).await {
+                                                Ok(Ok(result)) => result,
+                                                _ => ToolResult::err("cancelled", "cancelled during execution"),
+                                            };
                                         }
-                                        outcome = tokio::time::timeout(core.tool_timeout, fut) => {
+                                        outcome = &mut timed => {
                                             result = match outcome {
                                                 Ok(result) => result,
-                                                Err(_) => ToolResult::err(
-                                                    "timeout",
-                                                    format!(
-                                                        "{} exceeded {} s; narrow the call or use bg for long work",
-                                                        call.name,
-                                                        core.tool_timeout.as_secs()
-                                                    ),
-                                                ),
+                                                Err(_) => timeout_result(),
                                             };
                                         }
                                     }

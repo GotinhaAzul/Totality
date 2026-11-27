@@ -1724,6 +1724,9 @@ impl App {
                 self.turn_state = Some(state);
             }
             AgentEvent::Discard { chars } => self.transcript.discard_text(chars),
+            AgentEvent::ToolProgress { call_id, tail } => {
+                self.transcript.tool_progress(&call_id, &tail);
+            }
             AgentEvent::Steered(text) => {
                 self.transcript.steered(&text);
                 self.sync_queue();

@@ -33,6 +33,8 @@ const TAIL_CAPTURE_BYTES: usize = 256 * 1024;
 const MAX_PREVIEW_BYTES: usize = 64 * 1024;
 /// Of `MAX_PREVIEW_BYTES`, the part kept from the start.
 const PREVIEW_HEAD_BYTES: usize = 16 * 1024;
+/// How often a running command's live tail is sent to the frontend.
+const LIVE_INTERVAL: Duration = Duration::from_millis(250);
 /// How long a terminated process group gets after SIGTERM.
 const TERM_GRACE: Duration = Duration::from_secs(2);
 
@@ -182,8 +184,16 @@ impl BashTool {
         };
 
         let captured = Arc::new(AtomicUsize::new(0));
-        let stdout_task = spawn_reader(child.stdout.take(), captured.clone());
-        let stderr_task = spawn_reader(child.stderr.take(), captured.clone());
+        // The frontend's live tail of what the command prints.
+        let sink = crate::tools::live::current();
+        let live = sink
+            .as_ref()
+            .map(|_| crate::tools::live::LiveTail::default());
+        let stdout_task = spawn_reader_live(child.stdout.take(), captured.clone(), live.clone());
+        let stderr_task = spawn_reader_live(child.stderr.take(), captured.clone(), live.clone());
+        let mut ticker = tokio::time::interval(LIVE_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut sent = 0u64;
 
         enum Outcome {
             Exited(std::io::Result<std::process::ExitStatus>),
@@ -196,10 +206,17 @@ impl BashTool {
         let cancel = ctx.cancel.cancelled();
         tokio::pin!(cancel);
 
-        let outcome = tokio::select! {
-            status = child.wait() => Outcome::Exited(status),
-            _ = &mut sleep => Outcome::TimedOut,
-            _ = &mut cancel => Outcome::Cancelled,
+        let outcome = loop {
+            tokio::select! {
+                status = child.wait() => break Outcome::Exited(status),
+                _ = &mut sleep => break Outcome::TimedOut,
+                _ = &mut cancel => break Outcome::Cancelled,
+                _ = ticker.tick() => {
+                    if let (Some(sink), Some(live)) = (&sink, &live) {
+                        crate::tools::live::send_if_changed(sink, live, &mut sent);
+                    }
+                }
+            }
         };
 
         let (status, timed_out, cancelled) = match outcome {
@@ -256,7 +273,7 @@ impl BashTool {
             true
         } else if cancelled {
             content.push_str(
-                "[cancelled] command was cancelled and its process group was terminated; re-run it when ready.\n\n",
+                "[cancelled] command was cancelled and its process group was terminated; the output below is partial (what it printed before that). Re-run it when ready.\n\n",
             );
             true
         } else if exit_code == Some(0) {
@@ -342,6 +359,18 @@ pub(crate) fn spawn_reader<R>(reader: Option<R>, captured: Arc<AtomicUsize>) -> 
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
+    spawn_reader_live(reader, captured, None)
+}
+
+/// [`spawn_reader`] that also feeds `live` with everything read.
+pub(crate) fn spawn_reader_live<R>(
+    reader: Option<R>,
+    captured: Arc<AtomicUsize>,
+    live: Option<crate::tools::live::LiveTail>,
+) -> JoinHandle<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
     tokio::spawn(async move {
         let Some(mut reader) = reader else {
             return Vec::new();
@@ -357,6 +386,9 @@ where
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    if let Some(live) = &live {
+                        live.push(&buf[..n]);
+                    }
                     let previous = captured.fetch_add(n, Ordering::SeqCst);
                     let take = n.min(MAX_CAPTURE_BYTES.saturating_sub(previous));
                     out.extend_from_slice(&buf[..take]);
@@ -583,6 +615,40 @@ mod tests {
         let ran = BashTool.call(&ctx, command).await;
         assert!(!ran.content.contains("GIT_DESTRUCTIVE"), "{}", ran.content);
         assert!(ran.content.contains("ran"), "{}", ran.content);
+    }
+
+    #[tokio::test]
+    async fn a_running_command_streams_its_tail_and_cancel_keeps_what_it_printed() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_context(dir.path());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = crate::tools::live::LiveSink {
+            call_id: "call_1".into(),
+            tx,
+        };
+        let cancel = ctx.cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1600)).await;
+            cancel.cancel();
+        });
+        let command = json!({"command": "for i in 1 2 3 4 5 6; do echo tick $i; sleep 0.5; done"});
+        let result = crate::tools::live::with_sink(sink, BashTool.call(&ctx, command)).await;
+        let mut tails = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::agent::AgentEvent::ToolProgress { call_id, tail } = event {
+                assert_eq!(call_id, "call_1");
+                tails.push(tail);
+            }
+        }
+        assert!(
+            tails.iter().any(|tail| tail.contains("tick 2")),
+            "{tails:?}"
+        );
+        assert!(result.is_error);
+        assert!(result.content.contains("partial"), "{}", result.content);
+        assert!(result.content.contains("tick 1"), "{}", result.content);
+        assert!(result.content.contains("tick 3"), "{}", result.content);
+        assert!(!result.content.contains("tick 6"), "{}", result.content);
     }
 
     #[tokio::test]
