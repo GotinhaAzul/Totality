@@ -2389,6 +2389,10 @@ fn fit_description(description: &str, width: usize) -> String {
 }
 
 fn render_modal(frame: &mut Frame, modal: &ModalData, area: Rect, theme: &Theme) {
+    if let ModalData::Settings(view) = modal {
+        crate::ui::settings_view::render(frame, view, area, theme);
+        return;
+    }
     let line_count = modal.row_count();
     let width = area
         .width

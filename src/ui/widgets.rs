@@ -610,6 +610,8 @@ pub enum ModalData {
     Picker(PickerModal),
     HunkReview(HunkReviewModal),
     Init(InitReview),
+    /// `/settings`, drawn by [`crate::ui::settings_view`].
+    Settings(crate::ui::settings_view::SettingsModal),
 }
 
 /// The `/init` proposal, one row per file to accept or reject. The content
@@ -747,6 +749,7 @@ impl ModalData {
                     view.items.len()
                 )
             }
+            ModalData::Settings(_) => " Settings ".into(),
             ModalData::Init(view) => format!(
                 " Init · {}/{} files · Space toggle · a accept · r reject · Enter write · Esc cancel ",
                 view.chosen().len(),
@@ -776,6 +779,7 @@ impl ModalData {
             ModalData::Picker(view) => view.filtered().len().max(1),
             ModalData::HunkReview(view) => view.hunks.len().max(1),
             ModalData::Init(view) => init_rows(view).len().max(1),
+            ModalData::Settings(view) => view.visible().len().max(1),
         }
     }
 
@@ -787,6 +791,7 @@ impl ModalData {
             ModalData::Picker(view) => view.scroll,
             ModalData::HunkReview(view) => view.scroll,
             ModalData::Init(view) => view.scroll,
+            ModalData::Settings(_) => 0,
         }
     }
 
@@ -830,6 +835,8 @@ impl ModalData {
             }
             // A handful of files with their detail lines: always fits.
             ModalData::Init(view) => view.scroll = 0,
+            // Scrolls itself to the selection when drawn.
+            ModalData::Settings(_) => {}
         }
     }
 
@@ -842,6 +849,7 @@ impl ModalData {
             ModalData::Picker(view) => picker_lines(view, width, theme),
             ModalData::HunkReview(view) => hunk_review_lines(view, width, theme),
             ModalData::Init(view) => init_lines(view, width, theme),
+            ModalData::Settings(_) => Vec::new(),
         }
     }
 }

@@ -1987,28 +1987,37 @@ async fn init_review_esc_writes_nothing_and_esc_cancels_a_draft() {
 async fn settings_lists_every_key_and_saves_a_change_to_the_global_config() {
     let (dir, mut app) = test_app().await;
     app.run_command("/settings").await;
-    let Some(ModalData::Picker(picker)) = &app.modal else {
-        panic!("expected the settings picker");
+    let Some(ModalData::Settings(view)) = &app.modal else {
+        panic!("expected the settings screen");
     };
-    assert_eq!(picker.command, "settings");
-    assert_eq!(picker.items[0].label, "where");
-    assert_eq!(picker.items.len(), crate::settings::SETTINGS.len() + 1);
-    let review = picker
-        .items
+    assert_eq!(view.rows.len(), crate::settings::SETTINGS.len() + 1);
+    assert!(view.rows.iter().any(|row| row.key == "/settings where"));
+    let review = view
+        .rows
         .iter()
-        .find(|item| item.label == "review")
+        .find(|row| row.key == "review")
         .expect("review row");
-    assert!(
-        review.description.starts_with("off"),
-        "{}",
-        review.description
-    );
-    let api_key = picker
-        .items
+    assert_eq!(review.value, "off");
+    assert_eq!(review.label, "Hunk review");
+    let api_key = view
+        .rows
         .iter()
-        .find(|item| item.label == "model.api_key")
+        .find(|row| row.key == "model.api_key")
         .unwrap();
-    assert!(!api_key.description.contains("sk-"), "secrets stay hidden");
+    assert!(!api_key.value.contains("sk-"), "secrets stay hidden");
+    // It draws: tabs, sections, rows, and the description.
+    let mut screen = EmulatedScreen::new(110, 40);
+    screen.frame(&mut app, "settings screen");
+    let shown = screen.parser.screen().contents();
+    for expected in [
+        "Settings",
+        "Behavior",
+        "Appearance",
+        "Hunk review",
+        "type to search",
+    ] {
+        assert!(shown.contains(expected), "{expected}: {shown}");
+    }
     app.modal = None;
 
     // A choice opens a value picker; Enter on a value saves and returns.
@@ -2059,24 +2068,29 @@ async fn settings_lists_every_key_and_saves_a_change_to_the_global_config() {
         app.config.gates.todo_plan,
         crate::config::TodoPlanMode::Require
     );
-    let Some(ModalData::Picker(list)) = &app.modal else {
-        panic!("expected the settings list again");
+    let Some(ModalData::Settings(list)) = &app.modal else {
+        panic!("expected the settings screen again");
     };
-    assert_eq!(list.command, "settings");
-    assert_eq!(list.current, "gates.todo_plan");
-    // A bool row toggles in place.
+    assert_eq!(list.selected_row().unwrap().key, "gates.todo_plan");
+    // A bool row toggles in place; typing searches every tab.
     app.modal = None;
     app.run_command("/settings").await;
-    if let Some(ModalData::Picker(list)) = &mut app.modal {
-        list.selected = list
-            .filtered()
-            .iter()
-            .position(|item| item.label == "format.on_edit")
-            .unwrap();
+    for ch in "format.on".chars() {
+        app.handle_modal_key(key(KeyCode::Char(ch))).await;
+    }
+    if let Some(ModalData::Settings(list)) = &app.modal {
+        assert_eq!(list.selected_row().unwrap().key, "format.on_edit");
     }
     app.handle_modal_key(key(KeyCode::Enter)).await;
     assert!(!app.config.format.on_edit);
-    assert!(matches!(&app.modal, Some(ModalData::Picker(list)) if list.command == "settings"));
+    assert!(
+        matches!(&app.modal, Some(ModalData::Settings(list)) if list.selected_row().unwrap().key == "format.on_edit")
+    );
+    // Right switches tabs.
+    app.handle_modal_key(key(KeyCode::Right)).await;
+    if let Some(ModalData::Settings(list)) = &app.modal {
+        assert_eq!(crate::ui::settings_view::TABS[list.tab], "Model");
+    }
 
     app.modal = None;
     app.run_command("/settings where").await;

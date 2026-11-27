@@ -6,6 +6,7 @@ pub mod highlight;
 pub mod input;
 pub mod markdown;
 pub mod render;
+pub mod settings_view;
 pub mod theme;
 pub mod tree;
 pub mod tui;

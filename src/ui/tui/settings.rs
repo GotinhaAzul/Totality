@@ -57,22 +57,17 @@ impl App {
         }
     }
 
-    /// The settings list, preselecting `current` when given.
+    /// The settings screen, preselecting `current` when given.
     fn open_settings_list(&mut self, current: &str) {
-        let mut items = vec![PickItem {
-            label: "where".into(),
-            description: "config files, profiles, MCP, hooks, rules, verify steps".into(),
-            action: PickAction::Run("/settings where".into()),
-        }];
+        use crate::ui::settings_view::{SettingsModal, SettingsRow, placement};
+        let config_path = self
+            .core()
+            .map(|core| core.paths.config_file().display().to_string())
+            .unwrap_or_default();
+        let mut rows = Vec::new();
         for setting in settings::SETTINGS {
             let value = settings::current(&self.config, setting);
             let shown = settings::display(setting, value.as_ref());
-            // Notes go before the description so a narrow screen keeps them.
-            let mut description = shown.clone();
-            for note in self.setting_notes(setting) {
-                description.push_str(&format!(" [{note}]"));
-            }
-            description.push_str(&format!("  · {}", setting.about));
             let action = match setting.kind {
                 Kind::Bool => {
                     let on = value.as_ref().and_then(toml::Value::as_bool) == Some(true);
@@ -88,30 +83,43 @@ impl App {
                     let prefill = match &value {
                         Some(toml::Value::String(text)) => text.clone(),
                         Some(toml::Value::Array(items)) if items.is_empty() => String::new(),
-                        Some(_) => shown,
+                        Some(_) => shown.clone(),
                         None => String::new(),
                     };
                     PickAction::Fill(format!("/settings {} {prefill}", setting.key))
                 }
             };
-            items.push(PickItem {
-                label: setting.key.to_string(),
-                description,
+            let (tab, section, label) = placement(setting);
+            rows.push(SettingsRow {
+                tab,
+                section,
+                key: setting.key.to_string(),
+                label,
+                value: shown,
+                notes: self.setting_notes(setting),
+                about: format!(
+                    "{} · takes effect: {}",
+                    setting.about,
+                    setting.apply.label()
+                ),
                 action,
             });
         }
-        let subtitle = self
-            .core()
-            .map(|core| core.paths.config_file().display().to_string())
-            .unwrap_or_default();
-        let picker = PickerModal::new(
-            "settings",
-            "Settings · Enter toggles or edits",
-            items,
-            current,
-        )
-        .with_subtitle(subtitle);
-        self.open_picker(picker, "no settings");
+        rows.push(SettingsRow {
+            tab: "Files",
+            section: "Config",
+            key: "/settings where".into(),
+            label: "Where config lives".into(),
+            value: config_path.clone(),
+            notes: Vec::new(),
+            about: "config files, profiles, MCP servers, hooks, rules, and verify steps; Enter lists them".into(),
+            action: PickAction::Run("/settings where".into()),
+        });
+        let mut view = SettingsModal::new(rows, config_path);
+        if !current.is_empty() {
+            view.select_key(current);
+        }
+        self.modal = Some(ModalData::Settings(view));
     }
 
     /// Why a saved value might not be what this session uses.

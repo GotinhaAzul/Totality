@@ -456,6 +456,43 @@ impl App {
                 }
                 _ => {}
             },
+            ModalData::Settings(view) => {
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                match key.code {
+                    KeyCode::Esc => {
+                        if view.filter.is_empty() {
+                            close = true;
+                        } else {
+                            view.filter.clear();
+                            view.selected = 0;
+                        }
+                    }
+                    KeyCode::Up => view.move_by(-1),
+                    KeyCode::Down => view.move_by(1),
+                    KeyCode::Char('p' | 'k') if ctrl => view.move_by(-1),
+                    KeyCode::Char('n' | 'j') if ctrl => view.move_by(1),
+                    KeyCode::PageUp => view.move_by(-10),
+                    KeyCode::PageDown => view.move_by(10),
+                    KeyCode::Home => view.move_by(isize::MIN / 2),
+                    KeyCode::End => view.move_by(isize::MAX / 2),
+                    KeyCode::Left => view.switch_tab(-1),
+                    KeyCode::Right => view.switch_tab(1),
+                    KeyCode::Tab => view.jump_section(1),
+                    KeyCode::BackTab => view.jump_section(-1),
+                    KeyCode::Backspace => view.pop_filter(),
+                    KeyCode::Enter => {
+                        picked = view.selected_row().map(|row| row.action.clone());
+                        self.settings_return = matches!(
+                            &picked,
+                            Some(PickAction::Run(command)) if command.starts_with("/settings ")
+                        );
+                    }
+                    KeyCode::Char(ch) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
+                        view.push_filter(ch);
+                    }
+                    _ => {}
+                }
+            }
             ModalData::Init(view) => match key.code {
                 KeyCode::Esc => close = true,
                 KeyCode::Up | KeyCode::Char('k') => view.move_by(-1),
