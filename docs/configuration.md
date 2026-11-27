@@ -100,7 +100,7 @@ stream_idle_timeout_secs = 120
 [ui]
 theme = "default"               # default | catppuccin-mocha | gruvbox-dark | light | high-contrast
 color_mode = "auto"             # auto | truecolor | 256 | 16
-show_reasoning = false          # Ctrl+R toggles and rewrites this key
+show_reasoning = false          # Ctrl+T toggles and rewrites this key
 show_token_counts = true
 mouse = true                    # wheel scrolls the conversation; Shift+drag selects text
 bell = true                     # ring once when something new needs you
@@ -238,7 +238,7 @@ extra_body = { chat_template_kwargs = { enable_thinking = true } }
 `TOT_PROFILE` still override it. The built-in default is `coding`. A successful
 `/profile` switch writes this key.
 
-`/theme <name>`, `Ctrl+R`, a successful `/profile` switch, and `/settings`
+`/theme <name>`, `Ctrl+T`, a successful `/profile` switch, and `/settings`
 update the global config in place: the write is atomic, every unrelated key is
 preserved, an existing file keeps its mode, and a new file is created `0600`
 (a secret such as `model.api_key` always leaves the file `0600`). A failed

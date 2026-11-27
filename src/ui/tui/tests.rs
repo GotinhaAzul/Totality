@@ -1576,9 +1576,9 @@ async fn applying_theme_profile_and_reasoning_persists_them() {
     app.handle_modal_key(key(KeyCode::Esc)).await;
     assert_eq!(app.theme.name, "hati", "Esc restores the saved theme");
 
-    // Ctrl+R toggles and persists the reasoning visibility.
+    // Ctrl+T toggles and persists the reasoning visibility.
     app.input.set_text("");
-    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
+    app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
         .await;
     assert!(app.config.ui.show_reasoning);
     assert_eq!(saved()["ui"]["show_reasoning"].as_bool(), Some(true));
@@ -2034,4 +2034,59 @@ async fn ctrl_c_clears_a_draft_and_quits_only_on_a_second_press() {
     assert!(!app.quit);
     app.handle_key(ctrl_c).await;
     assert!(app.quit);
+}
+
+#[tokio::test]
+async fn ctrl_r_searches_prompt_history_and_fills_the_pick() {
+    let (_dir, mut app) = test_app().await;
+    for text in ["fix the parser", "run the tests", "fix the lexer"] {
+        app.input.set_text(text);
+        app.input.submit(true).unwrap();
+    }
+    app.input.set_text("half-typed");
+    app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
+        .await;
+    let Some(ModalData::Picker(view)) = &app.modal else {
+        panic!("history picker");
+    };
+    assert_eq!(view.items[0].label, "fix the lexer", "newest first");
+    for ch in "parser".chars() {
+        app.handle_key(key(KeyCode::Char(ch))).await;
+    }
+    app.handle_key(key(KeyCode::Enter)).await;
+    assert!(app.modal.is_none());
+    assert_eq!(app.input.text(), "fix the parser");
+    // The draft it replaced is still in history.
+    assert!(app.input.history().iter().any(|text| text == "half-typed"));
+}
+
+#[test]
+fn the_external_editor_round_trips_the_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("ed.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nprintf '%s edited\\n' \"$(cat \"$1\")\" > \"$1\"\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let edited = edit_in_editor(&script.display().to_string(), "draft").unwrap();
+    assert_eq!(edited, "draft edited");
+    assert!(edit_in_editor("false", "draft").is_err());
+}
+
+#[tokio::test]
+async fn up_walks_back_through_every_prompt() {
+    let (_dir, mut app) = test_app().await;
+    for text in ["first", "second", "third"] {
+        app.input.set_text(text);
+        app.input.submit(true).unwrap();
+    }
+    for expected in ["third", "second", "first"] {
+        app.handle_key(key(KeyCode::Up)).await;
+        assert_eq!(app.input.text(), expected);
+    }
+    app.handle_key(key(KeyCode::Down)).await;
+    assert_eq!(app.input.text(), "second");
 }

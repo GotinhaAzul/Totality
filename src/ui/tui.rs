@@ -177,7 +177,9 @@ Keys: Enter send · Shift+Enter / Ctrl+J newline · Esc interrupt or dismiss
 Tab complete commands, arguments, and paths · Shift+Tab previous choice
 @path in a prompt attaches that file for the model · a large paste shows as
 [Pasted text #1 +N lines] and is sent in full; Alt+E expands it for editing
-Ctrl+R show thinking · Ctrl+O expand tool output · Ctrl+T toggle the plan
+Ctrl+T show thinking · Ctrl+O expand tool output · Alt+P toggle the plan
+Up/Down walk prompt history · Ctrl+R search it · Ctrl+G edit in $EDITOR
+Ctrl+U clear to line start · Ctrl+W/Ctrl+K kill word/to end · Ctrl+_ or Ctrl+Z undo
 Ctrl+L redraw the screen (if it ever looks garbled)
 Scroll: mouse wheel · PgUp/PgDn half page · Shift+Up/Down one line
 Home/End top and bottom (prompt empty) · Ctrl+Home/End anytime
@@ -186,7 +188,8 @@ Hold Shift while dragging to select text ([ui] mouse = false disables
 mouse capture).";
 
 /// Footer hints while idle.
-const HINTS: &str = "⇧enter newline · ctrl+r thinking · ctrl+o tool output · pgup scroll";
+const HINTS: &str =
+    "⇧enter newline · ctrl+r history · ctrl+t thinking · ctrl+o tool output · pgup scroll";
 
 /// Shortest gap between two frames while output streams (~60 fps). Input
 /// events draw immediately.
@@ -285,7 +288,11 @@ pub async fn run(runtime: Runtime, options: UiOptions) -> Result<()> {
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Event>();
     std::thread::spawn(move || {
         loop {
-            match event::poll(Duration::from_millis(100)) {
+            if INPUT_PAUSED.load(Ordering::SeqCst) {
+                std::thread::sleep(INPUT_POLL);
+                continue;
+            }
+            match event::poll(INPUT_POLL) {
                 Ok(true) => match event::read() {
                     Ok(ev) => {
                         if event_tx.send(ev).is_err() {
@@ -1243,7 +1250,12 @@ impl App {
             None => (String::new(), Role::Muted),
         };
         let hints = if !self.transcript.follow {
-            "End or Ctrl+End to return to the bottom · wheel/pgup/pgdn scroll".to_string()
+            // End edits a non-empty prompt, so name the key that works now.
+            if self.input.is_empty() {
+                "End to return to the bottom · wheel/pgup/pgdn scroll".to_string()
+            } else {
+                "Ctrl+End to return to the bottom · wheel/pgup/pgdn scroll".to_string()
+            }
         } else if self.turn_active {
             "esc interrupt · ctrl+o tool output · wheel/pgup scroll".to_string()
         } else {

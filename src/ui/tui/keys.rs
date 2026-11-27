@@ -36,6 +36,62 @@ impl App {
         }
     }
 
+    /// Ctrl+R: a filterable picker over sent prompts, newest first; Enter
+    /// puts the chosen one in the prompt to edit or send. A draft in the
+    /// prompt stays one Up away.
+    pub(super) fn open_history_search(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        let items: Vec<PickItem> = self
+            .input
+            .history()
+            .iter()
+            .rev()
+            .filter(|text| seen.insert(text.as_str()))
+            .map(|text| {
+                let rows = text.lines().count();
+                PickItem {
+                    label: text.split_whitespace().collect::<Vec<_>>().join(" "),
+                    description: if rows > 1 {
+                        format!("{rows} lines")
+                    } else {
+                        String::new()
+                    },
+                    action: PickAction::Fill(text.clone()),
+                }
+            })
+            .collect();
+        if !self.input.is_empty() {
+            let draft = self.input.expanded_text();
+            self.input.stash_in_history(&draft);
+        }
+        self.open_picker(
+            PickerModal::new("history", "Prompt history", items, ""),
+            "no prompt history yet",
+        );
+    }
+
+    /// Ctrl+G: edit the draft (collapsed pastes expanded) in `$VISUAL` or
+    /// `$EDITOR`, then load the result back into the prompt.
+    pub(super) fn edit_prompt_externally(&mut self) {
+        let Some(editor) = external_editor() else {
+            self.set_notice(
+                "set $VISUAL or $EDITOR to edit the prompt in an editor",
+                Role::Warning,
+            );
+            return;
+        };
+        let draft = self.input.expanded_text();
+        let result = suspend_terminal(|| edit_in_editor(&editor, &draft));
+        self.repaint = true;
+        match result {
+            Ok(text) => {
+                self.input.set_text(&text);
+                self.set_notice("prompt loaded from the editor", Role::Muted);
+            }
+            Err(error) => self.set_notice(format!("editor: {error:#}"), Role::Warning),
+        }
+    }
+
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
         if self.modal.is_some() {
             return;
@@ -134,6 +190,15 @@ impl App {
         }
 
         if ctrl && matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R')) {
+            self.open_history_search();
+            return;
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G')) {
+            self.edit_prompt_externally();
+            return;
+        }
+
+        if ctrl && matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T')) {
             let show = !self.config.ui.show_reasoning;
             self.config.ui.show_reasoning = show;
             self.transcript.set_show_reasoning(show);
@@ -164,7 +229,7 @@ impl App {
             );
             return;
         }
-        if ctrl && matches!(key.code, KeyCode::Char('t') | KeyCode::Char('T')) {
+        if alt && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
             self.show_plan = !self.show_plan;
             self.set_notice(
                 if self.show_plan {
@@ -310,8 +375,14 @@ impl App {
                         .cycle_completion(delta, completion.candidates.len());
                     return;
                 }
-                if self.input.is_empty() {
-                    let moved = if matches!(key.code, KeyCode::Up) {
+                let up = matches!(key.code, KeyCode::Up);
+                let walks = if up {
+                    self.input.walks_history_up()
+                } else {
+                    self.input.walks_history_down()
+                };
+                if walks {
+                    let moved = if up {
                         self.input.history_prev()
                     } else {
                         self.input.history_next()

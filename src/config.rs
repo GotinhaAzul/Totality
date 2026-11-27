@@ -755,7 +755,7 @@ impl Config {
         true
     }
 
-    /// Persist one `[ui]` setting, used by `/theme` and `Ctrl+R`.
+    /// Persist one `[ui]` setting, used by `/theme` and `Ctrl+T`.
     pub fn save_ui_setting(path: &Path, key: &str, value: toml::Value) -> Result<()> {
         Self::save_setting(path, "ui", key, value)
     }
