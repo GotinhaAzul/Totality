@@ -162,6 +162,11 @@ pub struct Transcript {
     extra: Vec<(usize, Block)>,
     banner: Option<Block>,
     turn: Vec<Block>,
+    /// Indices into `turn` of notes pushed with [`Transcript::push_note`]
+    /// during the live turn; they outlive it in `extra`.
+    turn_notes: Vec<usize>,
+    /// `session.len()` when the live turn began.
+    turn_base: usize,
     live_user: Option<Block>,
     live_assistant: Option<Block>,
     /// Wrapped lines: the stable prefix (banner, session, notes) followed by
@@ -201,6 +206,8 @@ impl Transcript {
             extra: Vec::new(),
             banner: None,
             turn: Vec::new(),
+            turn_notes: Vec::new(),
+            turn_base: 0,
             live_user: None,
             live_assistant: None,
             lines: Vec::new(),
@@ -263,6 +270,7 @@ impl Transcript {
         self.session.clear();
         self.extra.clear();
         self.turn.clear();
+        self.turn_notes.clear();
         self.live_user = None;
         self.live_assistant = None;
         self.follow = true;
@@ -271,16 +279,53 @@ impl Transcript {
         self.mark_dirty();
     }
 
+    /// A local note. During a live turn it renders in the turn, where it
+    /// happened (a permission question below the prompt and the running
+    /// tool, not above them), and stays there once the turn is committed.
     pub fn push_note(&mut self, title: impl Into<String>, body: impl Into<String>, is_error: bool) {
+        let note = Block::note(title, body, is_error);
+        if self.live_user.is_some() {
+            self.turn_notes.push(self.turn.len());
+            self.turn.push(note);
+            self.mark_tail_dirty();
+            return;
+        }
         let anchor = self.session.len();
-        self.extra
-            .push((anchor, Block::note(title, body, is_error)));
+        self.insert_extra(anchor, note);
         self.mark_dirty();
     }
 
+    /// Keep `extra` ordered by anchor (stable, so equal anchors keep their
+    /// push order).
+    fn insert_extra(&mut self, anchor: usize, note: Block) {
+        let at = self.extra.partition_point(|(other, _)| *other <= anchor);
+        self.extra.insert(at, (anchor, note));
+    }
+
+    /// Move the live turn's notes into `extra`, anchored after the turn's
+    /// user message and the blocks that preceded each note, which is where
+    /// the committed session will show the same steps.
+    fn keep_turn_notes(&mut self) {
+        let notes = std::mem::take(&mut self.turn_notes);
+        for index in notes {
+            let Some(note) = self.turn.get(index).cloned() else {
+                continue;
+            };
+            // Notes are not session blocks, so they do not count.
+            let before = self.turn[..index]
+                .iter()
+                .filter(|block| !matches!(block.kind, BlockKind::Note { .. }))
+                .count();
+            let anchor = self.turn_base + usize::from(self.live_user.is_some()) + before;
+            self.insert_extra(anchor, note);
+        }
+    }
+
     pub fn begin_turn(&mut self, user_text: &str) {
+        self.keep_turn_notes();
         self.turn.clear();
         self.turn_cache.clear();
+        self.turn_base = self.session.len();
         self.live_assistant = None;
         self.live_user = Some(Block::user(user_text));
         self.live_user_cache = None;
@@ -409,6 +454,10 @@ impl Transcript {
     }
 
     pub fn finish_turn(&mut self) {
+        if !self.turn_notes.is_empty() {
+            self.keep_turn_notes();
+            self.mark_dirty();
+        }
         self.turn.clear();
         self.turn_cache.clear();
         self.live_user = None;
@@ -2566,6 +2615,47 @@ mod tests {
         let tool = text.find("Read src/lib.rs").unwrap();
         let reply = text.find("Looking.").unwrap();
         assert!(user < reply && reply < tool, "{text}");
+    }
+
+    #[test]
+    fn a_note_raised_mid_turn_renders_below_the_prompt_that_caused_it() {
+        let theme = Theme::bundled("default");
+        let mut transcript = Transcript::new(false);
+        transcript.set_session(vec![Block::user("earlier")]);
+        transcript.begin_turn("run touch new.txt");
+        transcript.tool_started("c1", "bash", "touch new.txt");
+        transcript.push_note("permission · bash", "$ touch new.txt", false);
+        transcript.prepare(80, &theme, false);
+        let text = joined(transcript.lines());
+        let prompt = text.find("run touch new.txt").unwrap();
+        let tool = text.find("Bash").unwrap();
+        let note = text.find("permission · bash").unwrap();
+        assert!(prompt < tool && tool < note, "{text}");
+
+        // Committed: the note stays after the prompt and the tool row.
+        transcript.finish_turn();
+        transcript.set_session(vec![
+            Block::user("earlier"),
+            Block::user("run touch new.txt"),
+            Block::tool(
+                Some("c1".into()),
+                "bash",
+                "touch new.txt",
+                ToolStatus::Ok,
+                Some(5),
+                "",
+                None,
+            ),
+            Block::assistant("done".to_string(), None),
+        ]);
+        transcript.push_note("later", "after the turn", false);
+        transcript.prepare(80, &theme, false);
+        let text = joined(transcript.lines());
+        let prompt = text.find("run touch new.txt").unwrap();
+        let note = text.find("permission · bash").unwrap();
+        let done = text.find("done").unwrap();
+        let later = text.find("after the turn").unwrap();
+        assert!(prompt < note && note < done && done < later, "{text}");
     }
 
     #[test]
