@@ -2010,3 +2010,28 @@ async fn settings_lists_every_key_and_saves_a_change_to_the_global_config() {
     app.run_command("/settings where").await;
     assert!(app.modal.is_none());
 }
+
+#[tokio::test]
+async fn ctrl_c_clears_a_draft_and_quits_only_on_a_second_press() {
+    let (_dir, mut app) = test_app().await;
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    app.input.set_text("a long draft I do not want to lose");
+    app.handle_key(ctrl_c).await;
+    assert!(!app.quit);
+    assert!(app.input.is_empty());
+    // Up brings the cleared draft back.
+    app.handle_key(key(KeyCode::Up)).await;
+    assert_eq!(app.input.text(), "a long draft I do not want to lose");
+    app.input.set_text("");
+
+    // Empty prompt: the first press asks, a key in between disarms it.
+    app.handle_key(ctrl_c).await;
+    assert!(!app.quit);
+    assert!(app.notice.as_ref().unwrap().0.contains("again to exit"));
+    app.handle_key(key(KeyCode::Char('x'))).await;
+    app.input.set_text("");
+    app.handle_key(ctrl_c).await;
+    assert!(!app.quit);
+    app.handle_key(ctrl_c).await;
+    assert!(app.quit);
+}

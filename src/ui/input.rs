@@ -177,6 +177,20 @@ impl InputState {
         }
     }
 
+    /// Keep a discarded draft one Up away for this run, without writing it
+    /// to the history file (it was never sent).
+    pub fn stash_in_history(&mut self, text: &str) {
+        if text.trim().is_empty() || self.history.last().map(String::as_str) == Some(text) {
+            return;
+        }
+        self.history.push(text.to_string());
+        if self.history.len() > HISTORY_LIMIT {
+            self.history.remove(0);
+        }
+        self.history_index = None;
+        self.draft.clear();
+    }
+
     /// Load prompt history from `path` (JSON-lines of strings, newest last)
     /// and append future prompts to it. A missing or damaged file is not an
     /// error: history is a convenience.

@@ -20,6 +20,8 @@ release may change defaults when the change is called out below.
 
 ### Changed
 
+- Ctrl+C on an idle prompt clears the draft (Up recalls it) instead of
+  quitting; on an empty prompt it asks for a second press within 1.5 s (#198).
 - `/approve` is now `/permissions approve`, next to the other permission
   controls. It still runs while the model is working and still permits
   exactly the next sensitive action after a provenance warning; `/permissions

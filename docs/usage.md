@@ -170,7 +170,7 @@ The terminal interface is the default. It speaks in two voices: the model in Sko
 | `Enter` | send |
 | `Ctrl+J` | newline |
 | `Esc` | cancel the current stream |
-| `Ctrl+C` | cancel; again to quit |
+| `Ctrl+C` | cancel a turn (again while cancelling to quit); idle, clear the prompt (Up recalls it); on an empty prompt, press twice to quit |
 | `Ctrl+D` | quit when the input is empty |
 | `Up`/`Down` | history when input is empty; otherwise cursor |
 | `PgUp`/`PgDn`, `Home`/`End` | scroll transcript |

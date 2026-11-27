@@ -62,11 +62,26 @@ impl App {
                 } else {
                     self.cancel_turn();
                 }
-            } else {
+            } else if !self.input.is_empty() {
+                // The shell reflex: clear the line, not the program. The
+                // draft stays one Up away.
+                let draft = self.input.expanded_text();
+                self.input.stash_in_history(&draft);
+                self.input.set_text("");
+                self.quit_armed = None;
+                self.set_notice("draft cleared · Up recalls it", Role::Muted);
+            } else if self
+                .quit_armed
+                .is_some_and(|at| at.elapsed() <= QUIT_CONFIRM_WINDOW)
+            {
                 self.quit = true;
+            } else {
+                self.quit_armed = Some(Instant::now());
+                self.set_notice("press Ctrl+C again to exit", Role::Warning);
             }
             return;
         }
+        self.quit_armed = None;
         if ctrl && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D')) {
             if self.input.is_empty() && !self.turn_active {
                 self.quit = true;
