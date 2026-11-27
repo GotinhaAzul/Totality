@@ -49,6 +49,7 @@ use crate::workflows::{self, WorkflowSpec};
 
 /// Slash commands with one-line descriptions for the completion popup.
 mod attention;
+mod clipboard;
 mod commands;
 mod git_commands;
 mod keys;
@@ -107,6 +108,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     ("export", "write the branch as Markdown"),
     ("clear", "clear the transcript view"),
+    (
+        "copy",
+        "copy the last answer (or `code`: its last code block) to the clipboard",
+    ),
+    (
+        "scrollback",
+        "write the transcript to the terminal's own scrollback",
+    ),
     ("debug", "toggle the debug panel"),
 ];
 
@@ -121,7 +130,7 @@ pub(crate) fn runs_during_turn(line: &str) -> bool {
         None => (body, ""),
     };
     match name {
-        "help" | "quit" | "debug" => true,
+        "help" | "quit" | "debug" | "copy" => true,
         "permissions" => matches!(rest, "approve" | "why" | "rules") || rest.starts_with("forget"),
         "trust" => rest != "confirm",
         _ => false,
@@ -158,6 +167,7 @@ fn command_usage(name: &str) -> &'static str {
             "/permissions [normal|accept-edits|deny-all|skip-ask|yolo|why|approve|rules|forget <n|all>]   (no argument: pick; why: what decided the last calls; approve: the next sensitive action after a provenance warning; rules: saved rules and session patterns; forget: drop a session pattern)"
         }
         "export" => "/export [path]",
+        "copy" => "/copy [code]   (OSC 52; under tmux, set-clipboard must be on)",
         _ => "",
     }
 }
@@ -169,7 +179,7 @@ Commands: /help [command] /quit /login [endpoint] [model] [api-key] /model [name
 /commit [confirm|cancel|edit <message>] /pr [confirm|cancel] /plan [approve|exit]
 /permissions [normal|accept-edits|deny-all|skip-ask|yolo|why|approve|rules|forget]
 /skill [name] /workflow [name] /sec [...] /trust [confirm] /export [path]
-/clear /debug
+/clear /debug /copy [code] /scrollback
 A command that chooses from a list opens a picker when run without an
 argument: type to filter, arrows to move, Enter to pick.
 
@@ -185,7 +195,8 @@ Scroll: mouse wheel · PgUp/PgDn half page · Shift+Up/Down one line
 Home/End top and bottom (prompt empty) · Ctrl+Home/End anytime
 Ctrl+C cancel a turn, clear the prompt, or (twice on an empty prompt) quit
 Hold Shift while dragging to select text ([ui] mouse = false disables
-mouse capture).";
+mouse capture), /copy copies the last answer, and /scrollback writes the
+transcript to the terminal's own scrollback.";
 
 /// Footer hints while idle.
 const HINTS: &str =
@@ -433,8 +444,13 @@ pub async fn run(runtime: Runtime, options: UiOptions) -> Result<()> {
 
     app.shutdown(&mut terminal).await;
     let fatal = app.fatal.take();
+    let summary = app.exit_summary();
     drop(_guard);
     restore_terminal();
+    // The alternate screen leaves nothing behind; say how to come back.
+    if let Some(summary) = summary {
+        println!("{summary}");
+    }
     if let Some(message) = fatal {
         bail!(message);
     }

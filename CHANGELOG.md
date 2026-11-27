@@ -27,6 +27,12 @@ release may change defaults when the change is called out below.
 
 ### Added
 
+- Getting text out of the alternate screen (#197): `/copy` puts the last
+  answer on the clipboard via OSC 52 (`/copy code`: its last code block; works
+  over SSH and in tmux with `set-clipboard on`), `/scrollback` writes the
+  transcript to the terminal's own scrollback, and quitting prints the
+  session path and the `tot --resume` line on the normal screen.
+
 - A running `bash` call shows a live tail of its last three output lines
   under its tool row (`⇣ tick 4`), updated four times a second; the model
   still gets only the capped final result (#201). `--json` emits
