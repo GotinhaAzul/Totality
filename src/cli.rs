@@ -2083,6 +2083,7 @@ fn render_event(
         }
         AgentEvent::Notice(message) => eprintln!("[notice] {message}"),
         AgentEvent::Steered(text) => eprintln!("[you] {text}"),
+        AgentEvent::ToolProgress { .. } => {}
         AgentEvent::Provenance {
             origin, warning, ..
         } => {

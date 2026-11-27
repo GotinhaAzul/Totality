@@ -399,6 +399,25 @@ impl Transcript {
         self.mark_tail_dirty();
     }
 
+    /// The latest output of a running call, shown under its row.
+    pub fn tool_progress(&mut self, call_id: &str, tail: &str) {
+        let Some(index) = self.turn.iter().rposition(|block| {
+            matches!(&block.kind, BlockKind::Tool { call_id: Some(id), status: ToolStatus::Running, .. } if id == call_id)
+        }) else {
+            return;
+        };
+        if let BlockKind::Tool { preview, .. } = &mut self.turn[index].kind {
+            if preview == tail {
+                return;
+            }
+            *preview = tail.to_string();
+        }
+        if let Some(slot) = self.turn_cache.get_mut(index) {
+            *slot = None;
+        }
+        self.mark_tail_dirty();
+    }
+
     pub fn tool_finished(
         &mut self,
         call_id: &str,
@@ -1618,6 +1637,24 @@ fn tool_lines(tool: ToolView<'_>, width: usize, theme: &Theme, expand: bool) -> 
         vec![Line::from(head)],
     );
     if tool.status == ToolStatus::Running {
+        // A live tail of what the command prints, so a slow build does not
+        // look hung.
+        let tail = tool.preview.trim_matches('\n');
+        if !tail.trim().is_empty() {
+            let body_width = inner.saturating_sub(GUTTER + 2).max(1);
+            let body = plain_lines(tail, body_width, theme.style(Role::Muted));
+            let start = body.len().saturating_sub(crate::tools::live::TAIL_LINES);
+            let body = body[start..]
+                .iter()
+                .cloned()
+                .map(|line| {
+                    let mut spans = vec![Span::styled("⇣ ", theme.style(Role::Muted))];
+                    spans.extend(line.spans);
+                    Line::from(spans)
+                })
+                .collect();
+            lines.extend(hang(body, theme));
+        }
         return lines;
     }
 

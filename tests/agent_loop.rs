@@ -6920,3 +6920,37 @@ async fn a_message_queued_mid_turn_reaches_the_model_after_the_tool_batch() {
     );
     assert!(harness.core.queued_steering().is_empty());
 }
+
+#[tokio::test]
+async fn cancelling_a_running_bash_call_keeps_what_it_printed() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(
+        dir.path(),
+        vec![
+            tool_script(
+                "bash",
+                json!({"command": "for i in 1 2 3 4 5 6; do echo tick $i; sleep 0.5; done"}),
+            ),
+            text_script("unused"),
+        ],
+        &["bash"],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+        stop.cancel();
+    });
+    let outcome = run_turn(harness.core.clone(), "tick".into(), tx, cancel).await;
+    assert_eq!(outcome.status, TurnStatus::Cancelled);
+    let result = last_tool_result(&harness.core.session);
+    assert!(result.contains("tick 1"), "{result}");
+    assert!(result.contains("partial"), "{result}");
+    let mut progress = false;
+    while let Ok(event) = rx.try_recv() {
+        progress |=
+            matches!(event, AgentEvent::ToolProgress { ref tail, .. } if tail.contains("tick"));
+    }
+    assert!(progress, "the frontend saw the live tail");
+}

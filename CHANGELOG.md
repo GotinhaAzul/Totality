@@ -9,6 +9,10 @@ release may change defaults when the change is called out below.
 
 ### Fixed
 
+- Cancelling a running `bash` call keeps what it printed: the result is
+  marked partial instead of being replaced by `cancelled during execution`
+  (#201).
+
 - Typing while a permission question is open no longer drops the text, and a
   `y` or `n` in a sentence no longer answers it (#193). Keys go to the
   prompt; the question is answered by Up/Down + Enter or the number keys, and
@@ -22,6 +26,11 @@ release may change defaults when the change is called out below.
   terminals, old Mac text) keeps every line instead of only the last (#195).
 
 ### Added
+
+- A running `bash` call shows a live tail of its last three output lines
+  under its tool row (`⇣ tick 4`), updated four times a second; the model
+  still gets only the capped final result (#201). `--json` emits
+  `tool_progress` events.
 
 - Messages typed while a turn runs are queued instead of refused (#196): they
   show as `queued` after the live turn and reach the model as user messages

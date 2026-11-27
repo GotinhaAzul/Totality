@@ -402,6 +402,12 @@ pub enum AgentEvent {
         approval_required: bool,
     },
     Notice(String),
+    /// The last lines a running tool printed (UI only; the model gets the
+    /// final result).
+    ToolProgress {
+        call_id: String,
+        tail: String,
+    },
     /// A message the user queued mid-turn was delivered to the model.
     Steered(String),
     /// The model call failed after streaming part of a reply and is being

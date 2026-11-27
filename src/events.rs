@@ -31,6 +31,7 @@ pub fn event_name(event: &AgentEvent) -> &'static str {
         AgentEvent::HunkReview { .. } => "hunk_review",
         AgentEvent::Notice(_) => "notice",
         AgentEvent::Steered(_) => "steered",
+        AgentEvent::ToolProgress { .. } => "tool_progress",
         AgentEvent::Discard { .. } => "discard",
         AgentEvent::Guard { .. } => "guard",
         AgentEvent::Error { .. } => "error",
@@ -111,6 +112,7 @@ pub fn event_json(event: &AgentEvent) -> Value {
         }),
         AgentEvent::Notice(message) => json!({"message": message}),
         AgentEvent::Steered(text) => json!({"text": text}),
+        AgentEvent::ToolProgress { call_id, tail } => json!({"call_id": call_id, "tail": tail}),
         AgentEvent::Discard { chars } => json!({"chars": chars}),
         AgentEvent::Guard { code, message } => json!({"code": code, "message": message}),
         AgentEvent::Error {
