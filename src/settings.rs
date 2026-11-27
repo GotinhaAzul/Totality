@@ -232,7 +232,7 @@ pub const SETTINGS: &[Setting] = &[
         "ui.show_reasoning",
         Kind::Bool,
         Ui,
-        "expand model thinking in the transcript (Ctrl+R toggles)",
+        "expand model thinking in the transcript (Ctrl+T toggles)",
     ),
     s(
         "ui.bell",

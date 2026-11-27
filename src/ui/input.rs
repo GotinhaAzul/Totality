@@ -238,6 +238,30 @@ impl InputState {
         }
     }
 
+    /// Prompts sent so far, oldest first.
+    pub fn history(&self) -> &[String] {
+        &self.history
+    }
+
+    /// Whether Up should go further back in history: the prompt is empty, or
+    /// it still holds the unedited entry Up recalled and the cursor is on its
+    /// first row.
+    pub fn walks_history_up(&self) -> bool {
+        self.is_empty() || (self.on_recalled_entry() && self.textarea.cursor().0 == 0)
+    }
+
+    /// Down's mirror of [`InputState::walks_history_up`]: on the last row of
+    /// an unedited recalled entry.
+    pub fn walks_history_down(&self) -> bool {
+        self.on_recalled_entry() && self.textarea.cursor().0 + 1 >= self.textarea.lines().len()
+    }
+
+    fn on_recalled_entry(&self) -> bool {
+        self.history_index
+            .and_then(|index| self.history.get(index))
+            .is_some_and(|entry| *entry == self.text())
+    }
+
     pub fn history_prev(&mut self) -> bool {
         if self.history.is_empty() {
             return false;
@@ -271,17 +295,37 @@ impl InputState {
         true
     }
 
-    /// Apply an editing key. `Ctrl+J` inserts a newline; everything else is
-    /// delegated to the textarea so undo and word movement keep working.
+    /// Apply an editing key. `Ctrl+J` inserts a newline, `Ctrl+U` kills to
+    /// the start of the line as in readline, `Ctrl+_` / `Ctrl+Z` undo and
+    /// `Ctrl+Shift+Z` redoes; everything else is delegated to the textarea so
+    /// word movement and the other kills keep working.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
             return false;
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('j') | KeyCode::Char('J'))
-        {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        if ctrl && matches!(key.code, KeyCode::Char('j') | KeyCode::Char('J')) {
             self.insert_newline();
             return true;
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('U')) {
+            self.reset_completion();
+            return self.textarea.delete_line_by_head();
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z')) {
+            self.reset_completion();
+            return if shift || key.code == KeyCode::Char('Z') {
+                self.textarea.redo()
+            } else {
+                self.textarea.undo()
+            };
+        }
+        // Ctrl+_ arrives as Ctrl+_, Ctrl+-, or Ctrl+7 depending on the
+        // terminal.
+        if ctrl && matches!(key.code, KeyCode::Char('_' | '-' | '7')) {
+            self.reset_completion();
+            return self.textarea.undo();
         }
         self.reset_completion();
         self.textarea.input(key)
@@ -477,6 +521,47 @@ mod tests {
         assert_eq!(input.text(), "second");
         assert!(input.history_next());
         assert!(input.is_empty());
+    }
+
+    #[test]
+    fn up_keeps_walking_history_until_the_entry_is_edited() {
+        let mut input = InputState::new();
+        for text in ["first", "second\nwith two rows", "third"] {
+            input.set_text(text);
+            input.submit(true).unwrap();
+        }
+        assert!(input.walks_history_up());
+        input.history_prev();
+        assert_eq!(input.text(), "third");
+        assert!(input.walks_history_up());
+        input.history_prev();
+        assert_eq!(input.text(), "second\nwith two rows");
+        // The cursor lands on the last row: Up moves it first.
+        assert!(!input.walks_history_up());
+        input.handle_key(key(KeyCode::Up, KeyModifiers::NONE));
+        assert!(input.walks_history_up());
+        input.history_prev();
+        assert_eq!(input.text(), "first");
+        assert!(input.walks_history_down());
+        input.history_next();
+        assert_eq!(input.text(), "second\nwith two rows");
+        // An edited entry is a draft: arrows move the cursor again.
+        input.insert_text("!");
+        assert!(!input.walks_history_up());
+        assert!(!input.walks_history_down());
+    }
+
+    #[test]
+    fn ctrl_u_kills_to_line_start_and_ctrl_underscore_undoes() {
+        let mut input = InputState::new();
+        input.insert_text("keep\nkill this");
+        input.handle_key(key(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(input.text(), "keep\n");
+        input.handle_key(key(KeyCode::Char('_'), KeyModifiers::CONTROL));
+        assert_eq!(input.text(), "keep\nkill this");
+        input.handle_key(key(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        input.handle_key(key(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert_eq!(input.text(), "keep\nkill this");
     }
 
     #[test]

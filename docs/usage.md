@@ -172,16 +172,21 @@ The terminal interface is the default. It speaks in two voices: the model in Sko
 | `Esc` | cancel the current stream |
 | `Ctrl+C` | cancel a turn (again while cancelling to quit); idle, clear the prompt (Up recalls it); on an empty prompt, press twice to quit |
 | `Ctrl+D` | quit when the input is empty |
-| `Up`/`Down` | history when input is empty; otherwise cursor |
-| `PgUp`/`PgDn`, `Home`/`End` | scroll transcript |
-| `Ctrl+R` | toggle reasoning (`[ui] show_reasoning` is saved) |
+| `Up`/`Down` | walk prompt history from an empty prompt (keeps going while the recalled entry is unedited); otherwise cursor |
+| `Ctrl+R` | search prompt history; Enter puts the pick in the prompt |
+| `Ctrl+G` | edit the prompt in `$VISUAL` / `$EDITOR` |
+| `Ctrl+U` / `Ctrl+W` / `Ctrl+K` | kill to line start / word / to line end |
+| `Ctrl+_` or `Ctrl+Z` | undo (`Ctrl+Shift+Z` redo) |
+| `PgUp`/`PgDn`, `Home`/`End` | scroll transcript (`Home`/`End` only while the prompt is empty; `Ctrl+Home`/`Ctrl+End` always) |
+| `Ctrl+T` | toggle reasoning (`[ui] show_reasoning` is saved) |
+| `Alt+P` | show or hide the plan |
 | `Ctrl+L` | redraw the whole screen |
 | `Alt+E` | expand collapsed pastes back into the prompt |
 | `/` | slash-command completion |
 | `Tab` / `Shift+Tab` | complete commands, arguments, and paths; move back through choices |
 | Review: `a` / `r` / `e` | accept, reject, or edit the selected hunk (`A`/`R` all, `Enter` apply, `Esc` reject all) |
 
-Tab completes the token at the cursor: commands, arguments (themes, profiles, skills, workflows, session ids, models, `/login` endpoints, `/help` topics, `/sec` subcommands), and file paths. Ambiguous matches first extend to their shared prefix, then open a picker. Every command that chooses from a list — `/model`, `/profile`, `/theme` (with live preview), `/permissions`, `/skill`, `/workflow`, `/sec`, `/resume` — opens a filterable menu when run without an argument: type to filter, arrows to move, Enter to pick. Model and profile switches load in the background, so the TUI stays responsive while the server swaps models. `/theme <name>` and a confirmed theme picker selection apply the theme and write `[ui] theme` to the global config at once; moving through the preview writes nothing. `/theme save` re-writes the current theme and reports the path, and `Ctrl+R` saves `[ui] show_reasoning` the same way.
+Tab completes the token at the cursor: commands, arguments (themes, profiles, skills, workflows, session ids, models, `/login` endpoints, `/help` topics, `/sec` subcommands), and file paths. Ambiguous matches first extend to their shared prefix, then open a picker. Every command that chooses from a list — `/model`, `/profile`, `/theme` (with live preview), `/permissions`, `/skill`, `/workflow`, `/sec`, `/resume` — opens a filterable menu when run without an argument: type to filter, arrows to move, Enter to pick. Model and profile switches load in the background, so the TUI stays responsive while the server swaps models. `/theme <name>` and a confirmed theme picker selection apply the theme and write `[ui] theme` to the global config at once; moving through the preview writes nothing. `/theme save` re-writes the current theme and reports the path, and `Ctrl+T` saves `[ui] show_reasoning` the same way.
 
 Write `@path` in a prompt to attach a file: `fix the panic in @src/parser.rs`. Typing `@` opens a live picker over the project's files (gitignored files excluded): it matches names fuzzily, shows each file's folder, and ranks paths under a typed directory first; Tab or Enter inserts the path. The file is read through the same path as the `read` tool and appended to your message, so the model can edit it without another read. Up to eight files per prompt, within a quarter of the usable context. You can also just name a file: `the panic at src/parser.rs:88` or a pasted stack trace attaches up to three existing text files in the project the same way, with `:line` suffixes and trace formats understood; a word that only looks like a path is ignored. `[prompt] attach_named_files = false` turns that off. `@shot.png` attaches a screenshot: a model with vision input sees the image, and a text-only model can get a description from a local vision model; the `read` tool opens images too. Images are checked by content, stripped of EXIF, and sent only to local endpoints unless you opt in. See [images.md](images.md).
 

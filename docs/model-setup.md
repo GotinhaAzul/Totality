@@ -127,10 +127,10 @@ tool_mode = "repair"        # native | repair | auto
   server.
 - `context_window` sets the prompt budget when probes are unavailable.
 - `strip_reasoning` (default `true`) controls retention. Reasoning always
-  streams live to the reasoning pane (Ctrl+R); with `true` it is dropped before
+  streams live to the reasoning pane (Ctrl+T); with `true` it is dropped before
   the assistant entry is written, so session files stay small and a resumed
   session has no reasoning to replay. Set `false` to persist it and see it
-  again in Ctrl+R after `--continue`. Reasoning is never sent back to the
+  again in Ctrl+T after `--continue`. Reasoning is never sent back to the
   provider. `<think>`/`<thinking>` blocks that arrive in
   content (a server without a reasoning parser) are moved to reasoning, as is
   text before a lone `</think>` from templates that open the block in the

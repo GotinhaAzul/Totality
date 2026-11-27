@@ -20,6 +20,13 @@ release may change defaults when the change is called out below.
 
 ### Changed
 
+- Prompt editing (#199): Up/Down keep walking history while the recalled
+  entry is unedited (Up used to stop at the newest prompt); **Ctrl+R now
+  searches prompt history**, so the thinking toggle moves to **Ctrl+T** and
+  the plan toggle to **Alt+P**; Ctrl+U clears to the line start as in
+  readline (undo is Ctrl+_ or Ctrl+Z, redo Ctrl+Shift+Z); Ctrl+G edits the
+  prompt in `$VISUAL`/`$EDITOR`; the scrolled-up footer names End or
+  Ctrl+End, whichever works with the prompt as it is.
 - Ctrl+C on an idle prompt clears the draft (Up recalls it) instead of
   quitting; on an empty prompt it asks for a second press within 1.5 s (#198).
 - `/approve` is now `/permissions approve`, next to the other permission

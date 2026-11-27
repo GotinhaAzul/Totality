@@ -14,6 +14,72 @@ pub(super) type Tty = Terminal<CrosstermBackend<BufWriter<Stdout>>>;
 
 pub(super) static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Set while another program owns the terminal; the input thread stops
+/// reading so it cannot steal that program's keystrokes.
+pub(super) static INPUT_PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// How long the input thread may sit in one `poll` before it rechecks
+/// [`INPUT_PAUSED`].
+pub(super) const INPUT_POLL: Duration = Duration::from_millis(50);
+
+/// Hand the terminal to `run` (an external editor): leave raw mode and the
+/// alternate screen, pause the input thread, and take everything back after.
+/// Without an active TUI (tests) `run` is simply called.
+pub(super) fn suspend_terminal<T>(run: impl FnOnce() -> T) -> T {
+    if !TERMINAL_ACTIVE.load(Ordering::SeqCst) {
+        return run();
+    }
+    INPUT_PAUSED.store(true, Ordering::SeqCst);
+    // Let a poll already in flight return.
+    std::thread::sleep(INPUT_POLL * 2);
+    let mouse = MOUSE_CAPTURE.load(Ordering::SeqCst);
+    restore_terminal();
+    let result = run();
+    // The TUI's own guard still restores on exit; this one must not.
+    if let Ok(guard) = TerminalGuard::enter(mouse) {
+        std::mem::forget(guard);
+    }
+    INPUT_PAUSED.store(false, Ordering::SeqCst);
+    result
+}
+
+/// Whether the TUI captured the mouse, so a resume restores the same state.
+static MOUSE_CAPTURE: AtomicBool = AtomicBool::new(false);
+
+/// The editor command for Ctrl+G: `$VISUAL`, then `$EDITOR`.
+pub(super) fn external_editor() -> Option<String> {
+    ["VISUAL", "EDITOR"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty())
+}
+
+/// Write `text` to a private temporary file, run `editor` on it through the
+/// shell (so `code --wait` works), and return what was saved, minus the
+/// trailing newline editors add.
+pub(super) fn edit_in_editor(editor: &str, text: &str) -> Result<String> {
+    let file = DraftFile::create(text)?;
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("tot-editor")
+        .arg(file.path())
+        .status()
+        .with_context(|| format!("cannot run {editor}"))?;
+    if !status.success() {
+        bail!("{editor} exited with {status}; the prompt is unchanged");
+    }
+    let mut edited = std::fs::read_to_string(file.path()).context("cannot read the draft back")?;
+    if edited.ends_with('\n') {
+        edited.pop();
+        if edited.ends_with('\r') {
+            edited.pop();
+        }
+    }
+    Ok(edited)
+}
+
 pub(super) fn install_panic_hook() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -49,6 +115,7 @@ pub(super) struct TerminalGuard;
 impl TerminalGuard {
     pub(super) fn enter(mouse: bool) -> Result<Self> {
         install_panic_hook();
+        MOUSE_CAPTURE.store(mouse, Ordering::SeqCst);
         enable_raw_mode().context("cannot enable raw mode")?;
         let mut out = std::io::stdout();
         // Focus reports let the UI repaint after the terminal was covered
@@ -84,5 +151,40 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         restore_terminal();
+    }
+}
+
+/// A private (0600, create-new) temporary file removed on drop.
+struct DraftFile(PathBuf);
+
+impl DraftFile {
+    fn create(text: &str) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.subsec_nanos())
+            .unwrap_or_default();
+        let path =
+            std::env::temp_dir().join(format!("tot-prompt-{}-{nanos:08x}.md", std::process::id()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .context("cannot create a temporary file")?;
+        let draft = DraftFile(path);
+        file.write_all(text.as_bytes())
+            .context("cannot write the draft")?;
+        Ok(draft)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for DraftFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
