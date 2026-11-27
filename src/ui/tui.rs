@@ -1155,7 +1155,7 @@ impl App {
         } else if blocked {
             "keys answer the question above · the agent waits for you"
         } else if busy {
-            "the agent is working · esc to interrupt"
+            "the agent is working · Enter queues a message for it · Esc interrupts"
         } else if self.switching.is_some() {
             "switching · type ahead, Enter sends when ready"
         } else {
@@ -1262,7 +1262,7 @@ impl App {
                 "Ctrl+End to return to the bottom · wheel/pgup/pgdn scroll".to_string()
             }
         } else if self.turn_active {
-            "esc interrupt · ctrl+o tool output · wheel/pgup scroll".to_string()
+            "enter queue a message · esc interrupt · ctrl+o tool output · pgup scroll".to_string()
         } else {
             HINTS.to_string()
         };
@@ -1563,6 +1563,40 @@ impl App {
         self.agent_task = Some(crate::agent::spawn_turn(core, text, tx, token));
     }
 
+    /// Mirror the core's undelivered messages in the transcript.
+    fn sync_queue(&mut self) {
+        let queued = self
+            .core()
+            .map(|core| core.queued_steering())
+            .unwrap_or_default();
+        self.transcript.set_queued(&queued);
+    }
+
+    /// Enter during a turn: queue the message for the next step instead of
+    /// refusing it.
+    fn queue_message(&mut self, text: String) {
+        let Some(core) = self.core().cloned() else {
+            return;
+        };
+        core.steer(text);
+        self.sync_queue();
+        self.set_notice(
+            "queued: the model sees it after the current step · Up takes it back · Esc cancels the turn",
+            Role::Muted,
+        );
+    }
+
+    /// Up on an empty prompt during a turn: the newest queued message comes
+    /// back for editing.
+    fn unqueue_message(&mut self) -> bool {
+        let Some(text) = self.core().and_then(|core| core.unqueue_last()) else {
+            return false;
+        };
+        self.input.set_text(&text);
+        self.sync_queue();
+        true
+    }
+
     fn cancel_turn(&mut self) {
         if !self.turn_active {
             return;
@@ -1587,10 +1621,21 @@ impl App {
         self.agent_rx = None;
         self.agent_task = None;
         self.transcript.finish_turn();
+        // Messages queued after the last step: a finished turn sends them as
+        // the next prompt; a cancelled or failed one puts them back in the
+        // prompt so nothing typed is lost.
+        let leftover = self
+            .core()
+            .map(|core| core.take_steering())
+            .unwrap_or_default();
+        self.transcript.set_queued(&[]);
         // Also syncs the session file.
         self.refresh_session_blocks();
         // Tools may have created or removed files; refresh `@` suggestions.
         self.spawn_files_refresh();
+        let finished_cleanly = outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.status == TurnStatus::Done && outcome.error.is_none());
         match outcome {
             Some(outcome) => {
                 // An exact error (for example `budget_static`) is the notice;
@@ -1638,6 +1683,25 @@ impl App {
                 self.set_notice("agent task ended unexpectedly", Role::Error);
             }
         }
+        if leftover.is_empty() {
+            return;
+        }
+        let text = leftover.join("\n\n");
+        if finished_cleanly {
+            self.start_turn(text);
+        } else {
+            let draft = self.input.expanded_text();
+            let restored = if draft.trim().is_empty() {
+                text
+            } else {
+                format!("{text}\n\n{draft}")
+            };
+            self.input.set_text(&restored);
+            self.set_notice(
+                "the turn ended before your queued message was sent; it is back in the prompt",
+                Role::Warning,
+            );
+        }
     }
 
     fn handle_agent_event(&mut self, event: AgentEvent) {
@@ -1660,6 +1724,10 @@ impl App {
                 self.turn_state = Some(state);
             }
             AgentEvent::Discard { chars } => self.transcript.discard_text(chars),
+            AgentEvent::Steered(text) => {
+                self.transcript.steered(&text);
+                self.sync_queue();
+            }
             AgentEvent::TextDelta(text) => {
                 let tokens = (text.chars().count() as u64).div_ceil(4).max(1);
                 self.record_tokens(tokens);

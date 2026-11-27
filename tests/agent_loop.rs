@@ -446,6 +446,7 @@ fn build_core_in_mode(
         reviewer: Default::default(),
         permissions,
         gate_errors: Default::default(),
+        steering: Default::default(),
     };
     (Arc::new(core), session)
 }
@@ -6888,4 +6889,34 @@ async fn a_harness_verify_that_needs_approval_without_a_frontend_is_skipped() {
     assert_eq!(outcome.status, TurnStatus::Done, "{:?}", outcome.error);
     assert_eq!(custom_kinds(&harness.session, "verify-result"), 0);
     assert_eq!(harness.provider.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_message_queued_mid_turn_reaches_the_model_after_the_tool_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
+    let harness = harness(
+        dir.path(),
+        vec![
+            call_script("call_1", "read", serde_json::json!({"path": "a.txt"})),
+            text_script("ok, also updating the README"),
+        ],
+        &["read"],
+    );
+    // Queued while the first model call runs.
+    harness.core.steer("also update the README".to_string());
+    let (outcome, events) = run(&harness, "read a.txt").await;
+    assert_eq!(outcome.status, totality::agent::TurnStatus::Done);
+    assert!(
+        events.iter().any(
+            |event| matches!(event, AgentEvent::Steered(text) if text == "also update the README")
+        ),
+        "{events:?}"
+    );
+    let users = user_messages(&harness.core.session);
+    assert_eq!(
+        users.last().map(String::as_str),
+        Some("also update the README")
+    );
+    assert!(harness.core.queued_steering().is_empty());
 }

@@ -1893,13 +1893,31 @@ async fn permissions_approve_runs_while_the_model_is_working() {
         notice(&app)
     );
 
-    // Prose and state-changing commands still wait for the turn.
-    for line in ["fix the bug", "/model", "/trust confirm"] {
+    // State-changing commands still wait for the turn.
+    for line in ["/model", "/trust confirm"] {
         app.input.set_text(line);
         app.handle_key(key(KeyCode::Enter)).await;
         assert_eq!(app.input.text(), line, "{line} must stay in the prompt");
         app.input.set_text("");
     }
+
+    // Prose is queued for the turn's next step; Up takes it back.
+    app.input.set_text("fix the bug");
+    app.handle_key(key(KeyCode::Enter)).await;
+    assert!(app.input.is_empty());
+    let core = app.core().unwrap().clone();
+    assert_eq!(core.queued_steering(), vec!["fix the bug".to_string()]);
+    let shown = app.transcript_text();
+    assert!(shown.contains("queued"), "{shown}");
+    app.handle_key(key(KeyCode::Up)).await;
+    assert_eq!(app.input.text(), "fix the bug");
+    assert!(core.queued_steering().is_empty());
+
+    // Queued but undelivered when the turn is cancelled: back in the prompt.
+    app.handle_key(key(KeyCode::Enter)).await;
+    app.input.set_text("");
+    app.finish_turn(Some(TurnOutcome::ok(TurnStatus::Cancelled)));
+    assert_eq!(app.input.text(), "fix the bug");
 }
 
 async fn next_init(app: &mut App) {

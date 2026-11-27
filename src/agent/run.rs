@@ -51,7 +51,7 @@ pub struct TurnOutcome {
 }
 
 impl TurnOutcome {
-    fn ok(status: TurnStatus) -> Self {
+    pub(crate) fn ok(status: TurnStatus) -> Self {
         Self {
             status,
             error: None,
@@ -1532,6 +1532,17 @@ async fn run_loop(
                 return TurnOutcome::ok(TurnStatus::Done);
             }
             return TurnOutcome::ok(TurnStatus::Done);
+        }
+        // Messages the user sent while the batch ran steer the next request.
+        let steered = core.take_steering();
+        if !steered.is_empty() {
+            for text in steered {
+                if let Err(err) = append_user(&core.session, &text) {
+                    return TurnOutcome::error("session_write", err.to_string());
+                }
+                let _ = tx.send(AgentEvent::Steered(text));
+            }
+            progress.user_steered();
         }
         if progress.stalled() && progress.try_pivot() {
             if let Err(err) = request_pivot(core.as_ref(), tx, &progress, StopReason::Stalled) {
@@ -5113,6 +5124,7 @@ mod tests {
                 crate::policy::PermissionMode::Yolo,
             )),
             gate_errors: Default::default(),
+            steering: Default::default(),
             config,
             paths: paths.clone(),
             provider: Arc::new(ProbeProvider {

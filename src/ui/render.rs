@@ -169,6 +169,9 @@ pub struct Transcript {
     turn_base: usize,
     live_user: Option<Block>,
     live_assistant: Option<Block>,
+    /// Messages queued for the running turn, shown after it until delivered.
+    queued: Vec<Block>,
+    queued_text: Vec<String>,
     /// Wrapped lines: the stable prefix (banner, session, notes) followed by
     /// the live turn. Only the turn is rebuilt while a reply streams.
     lines: Vec<Line<'static>>,
@@ -210,6 +213,8 @@ impl Transcript {
             turn_base: 0,
             live_user: None,
             live_assistant: None,
+            queued: Vec::new(),
+            queued_text: Vec::new(),
             lines: Vec::new(),
             prefix_len: 0,
             prefix_last: None,
@@ -443,6 +448,33 @@ impl Transcript {
         self.mark_tail_dirty();
     }
 
+    /// Show the messages waiting for the next step of the running turn.
+    pub fn set_queued(&mut self, queued: &[String]) {
+        if self.queued_text == queued {
+            return;
+        }
+        self.queued_text = queued.to_vec();
+        self.queued = queued
+            .iter()
+            .map(|text| {
+                Block::note(
+                    "queued · sent after the current step · Up edits",
+                    text.clone(),
+                    false,
+                )
+            })
+            .collect();
+        self.mark_tail_dirty();
+    }
+
+    /// A queued message reached the model: it becomes a user message in the
+    /// running turn.
+    pub fn steered(&mut self, text: &str) {
+        self.flush_live_assistant();
+        self.turn.push(Block::user(text));
+        self.mark_tail_dirty();
+    }
+
     pub fn turn_error(&mut self, code: &str, message: &str) {
         self.turn.push(Block::error(code, message));
         self.mark_tail_dirty();
@@ -577,7 +609,14 @@ impl Transcript {
                 RenderOpts { live: true, ..opts },
                 &mut self.live_markdown,
             ));
+            previous = Some(block);
         }
+        for block in &self.queued {
+            separate(&mut lines, previous, block);
+            lines.extend(render_block(block, width, theme, opts));
+            previous = Some(block);
+        }
+        let _ = previous;
         self.lines = lines;
         self.built_width = width;
         self.built_theme = theme_key;
@@ -2905,6 +2944,7 @@ mod perf_bench {
             copy.turn = t.turn.clone();
             copy.live_user = t.live_user.clone();
             copy.live_assistant = t.live_assistant.clone();
+            copy.queued = t.queued.clone();
             copy.expand_tools = t.expand_tools;
             copy.prepare(width, &theme, false);
             text(copy.lines())

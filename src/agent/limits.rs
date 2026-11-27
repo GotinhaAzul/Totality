@@ -198,6 +198,18 @@ impl RunProgress {
         }
     }
 
+    /// The user sent a message mid-turn: that is new intent, so the stall
+    /// window, the checkpoint allowance, and the gate retries start over.
+    pub fn user_steered(&mut self) {
+        self.ledger.reset();
+        self.epoch_tool_calls = 0;
+        self.epoch_model_calls = 0;
+        self.epoch_started_at = Instant::now();
+        self.settle_continuations = 0;
+        self.verify_attempts = 0;
+        self.pivot_used = false;
+    }
+
     pub fn elapsed(&self) -> Duration {
         self.started_at.elapsed()
     }

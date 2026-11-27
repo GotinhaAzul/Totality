@@ -334,12 +334,16 @@ impl App {
                 // `/permissions approve`, `/help`, and the like run mid-turn; anything
                 // else waits so a prompt is never sent into a running turn.
                 let busy_ok = command && !text.contains('\n') && runs_during_turn(&text);
-                let idle = (!self.turn_active && !waiting) || busy_ok;
+                // Prose sent mid-turn is queued for the turn's next step.
+                let queues = self.turn_active && !command && !waiting;
+                let idle = (!self.turn_active && !waiting) || busy_ok || queues;
                 match self.input.submit(idle) {
                     Some(text) => {
                         let trimmed = text.trim().to_string();
                         if trimmed.starts_with('/') {
                             self.run_command(&trimmed).await;
+                        } else if self.turn_active && !trimmed.is_empty() {
+                            self.queue_message(text);
                         } else if !trimmed.is_empty() {
                             self.start_turn(text);
                         }
@@ -357,7 +361,7 @@ impl App {
                     }
                     None if !idle => {
                         self.set_notice(
-                            "a turn is running; press Esc to cancel before sending (/permissions approve and /help work now)",
+                            "that command waits for the turn; prose is queued for the model (/permissions approve and /help work now)",
                             Role::Warning,
                         );
                     }
@@ -377,6 +381,9 @@ impl App {
                     return;
                 }
                 let up = matches!(key.code, KeyCode::Up);
+                if up && self.turn_active && self.input.is_empty() && self.unqueue_message() {
+                    return;
+                }
                 let walks = if up {
                     self.input.walks_history_up()
                 } else {
