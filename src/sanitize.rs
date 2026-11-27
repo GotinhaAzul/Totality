@@ -74,9 +74,16 @@ pub fn display(text: &str) -> Cow<'_, str> {
 }
 
 /// Pasted text for the prompt editor: like [`display`], but tabs are kept
-/// (the editor expands them itself, and they may matter to the model).
+/// (the editor expands them itself, and they may matter to the model), and
+/// every line break counts as one. tmux's `paste-buffer`, some terminals, and
+/// old Mac text end lines with a lone CR, which [`display`] would read as a
+/// progress-bar rewind and so keep only the last line.
 pub fn paste(text: &str) -> Cow<'_, str> {
-    clean(text, false, true)
+    if !text.contains('\r') {
+        return clean(text, false, true);
+    }
+    let lines = text.replace("\r\n", "\n").replace('\r', "\n");
+    Cow::Owned(clean(&lines, false, true).into_owned())
 }
 
 /// Command output for the model: escape sequences removed, carriage-return
@@ -251,6 +258,15 @@ mod tests {
     fn paste_keeps_tabs_but_normalizes_newlines() {
         assert!(matches!(paste("\tfn x() {}"), Cow::Borrowed(_)));
         assert_eq!(paste("a\r\n\tb\u{1b}[0m"), "a\n\tb");
+    }
+
+    #[test]
+    fn paste_treats_a_lone_carriage_return_as_a_line_break() {
+        assert_eq!(
+            paste("line one\rline two\rline three\r"),
+            "line one\nline two\nline three\n"
+        );
+        assert_eq!(paste("a\r\nb\rc\u{200b}"), "a\nb\nc");
     }
 
     #[test]

@@ -6,10 +6,10 @@ impl App {
     pub(super) async fn handle_event(&mut self, event: Event) {
         match event {
             Event::Key(key) => self.handle_key(key).await,
-            // Terminals send CRLF, and copied output can carry escapes;
-            // either would leave the editor's cursor out of step with the
-            // screen.
-            Event::Paste(text) => self.input.insert_text(&crate::sanitize::paste(&text)),
+            // Terminals send CRLF or lone CRs, and copied output can carry
+            // escapes; either would leave the editor's cursor out of step
+            // with the screen.
+            Event::Paste(text) => self.handle_paste(&text),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             // Some terminals reflow the old contents on resize; start clean.
             Event::Resize(_, _) => self.repaint = true,
@@ -17,6 +17,22 @@ impl App {
             // (a multiplexer reattaching, a terminal restoring a tab).
             Event::FocusGained => self.repaint = true,
             _ => {}
+        }
+    }
+
+    /// A paste: cleaned, and collapsed to a chip when large (except while a
+    /// hunk is open for editing, where the text itself is what is edited).
+    pub(super) fn handle_paste(&mut self, text: &str) {
+        let text = crate::sanitize::paste(text);
+        if self.hunk_edit.is_some() {
+            self.input.insert_text(&text);
+            return;
+        }
+        if let Some(chip) = self.input.insert_paste(&text) {
+            self.set_notice(
+                format!("pasted as {chip}; the full text is sent · Alt+E expands it here"),
+                Role::Muted,
+            );
         }
     }
 
@@ -196,6 +212,12 @@ impl App {
 
         if ctrl && matches!(key.code, KeyCode::Char('j') | KeyCode::Char('J')) {
             self.input.insert_newline();
+            return;
+        }
+        if alt && matches!(key.code, KeyCode::Char('e') | KeyCode::Char('E')) {
+            if !self.input.expand_pastes() {
+                self.set_notice("no collapsed paste to expand", Role::Muted);
+            }
             return;
         }
 
