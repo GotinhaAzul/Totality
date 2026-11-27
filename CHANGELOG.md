@@ -9,6 +9,10 @@ release may change defaults when the change is called out below.
 
 ### Changed
 
+- `/approve` is now `/permissions approve`, next to the other permission
+  controls. It still runs while the model is working and still permits
+  exactly the next sensitive action after a provenance warning; `/permissions
+  why` also runs mid-turn now. Typing `/approve` points to the new spelling.
 - Hunk review is off by default (`review = "off"`): edits land immediately,
   and the undo log and `/rewind` still cover them. Set `review = "auto"` (or
   `/settings review auto`) for the previous pause before risky or multi-file

@@ -228,7 +228,7 @@ impl App {
                 let text = self.input.text();
                 let command = text.trim_start().starts_with('/');
                 let waiting = self.switching.is_some() && !command;
-                // `/approve`, `/help`, and the like run mid-turn; anything
+                // `/permissions approve`, `/help`, and the like run mid-turn; anything
                 // else waits so a prompt is never sent into a running turn.
                 let busy_ok = command && !text.contains('\n') && runs_during_turn(&text);
                 let idle = (!self.turn_active && !waiting) || busy_ok;
@@ -254,7 +254,7 @@ impl App {
                     }
                     None if !idle => {
                         self.set_notice(
-                            "a turn is running; press Esc to cancel before sending (/approve and /help work now)",
+                            "a turn is running; press Esc to cancel before sending (/permissions approve and /help work now)",
                             Role::Warning,
                         );
                     }

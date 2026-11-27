@@ -93,17 +93,13 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("plan", "plan mode: investigate and propose, change nothing"),
     (
         "permissions",
-        "choose what runs without asking: normal, accept-edits, deny-all, skip-ask, yolo",
+        "choose what runs without asking, or approve after a provenance warning",
     ),
     ("tools", "show the active tools"),
     ("mcp", "show MCP server status"),
     ("skill", "pick a skill and append its instructions"),
     ("workflow", "pick a workflow to start on a new branch"),
     ("sec", "engagement summary, scope, or report"),
-    (
-        "approve",
-        "approve the next sensitive action after a provenance warning",
-    ),
     ("trust", "show the trust state"),
     (
         "verify",
@@ -115,9 +111,9 @@ pub const COMMANDS: &[(&str, &str)] = &[
 ];
 
 /// Whether a slash command line may run while a turn is in flight. These
-/// read state or touch only the session's approval latch: `/approve` covers
-/// the model's next sensitive action, so it is useful exactly while the model
-/// works. `/trust confirm` rebuilds the runtime and waits for the turn.
+/// read state or touch only the session's approval latch: `/permissions
+/// approve` covers the model's next sensitive action, so it is useful exactly
+/// while the model works. `/trust confirm` rebuilds the runtime and waits for the turn.
 pub(crate) fn runs_during_turn(line: &str) -> bool {
     let body = line.trim().trim_start_matches('/');
     let (name, rest) = match body.find(char::is_whitespace) {
@@ -125,7 +121,8 @@ pub(crate) fn runs_during_turn(line: &str) -> bool {
         None => (body, ""),
     };
     match name {
-        "help" | "quit" | "debug" | "approve" => true,
+        "help" | "quit" | "debug" => true,
+        "permissions" => matches!(rest, "approve" | "why"),
         "trust" => rest != "confirm",
         _ => false,
     }
@@ -152,14 +149,13 @@ fn command_usage(name: &str) -> &'static str {
         "sec" => {
             "/sec [summary|report|scope add|remove <target>|scope clear]   (no argument: pick)"
         }
-        "approve" => "/approve   (after a provenance warning; one action)",
         "trust" => "/trust [confirm]",
         "verify" => "/verify [accept]   (accept: save the detected steps for this project)",
         "commit" => "/commit [confirm|cancel|edit <message>]   (no argument: show or draft)",
         "pr" => "/pr [confirm|cancel]   (no argument: show the pending action)",
         "plan" => "/plan [approve|exit]   (no argument: enter plan mode, or show the plan)",
         "permissions" => {
-            "/permissions [normal|accept-edits|deny-all|skip-ask|yolo|why]   (no argument: pick; why: what decided the last calls)"
+            "/permissions [normal|accept-edits|deny-all|skip-ask|yolo|why|approve]   (no argument: pick; why: what decided the last calls; approve: the next sensitive action after a provenance warning)"
         }
         "export" => "/export [path]",
         _ => "",
@@ -171,8 +167,8 @@ Commands: /help [command] /quit /login [endpoint] [model] [api-key] /model [name
 [model-profile] /profile [name] /theme [name|save] /settings [key [value]] /tree /rewind [turns] [force] /fork /new
 /resume [id|last] /sessions /compact /tools /mcp
 /commit [confirm|cancel|edit <message>] /pr [confirm|cancel] /plan [approve|exit]
-/permissions [normal|accept-edits|deny-all|skip-ask|yolo]
-/skill [name] /workflow [name] /sec [...] /approve /trust [confirm] /export [path]
+/permissions [normal|accept-edits|deny-all|skip-ask|yolo|why|approve]
+/skill [name] /workflow [name] /sec [...] /trust [confirm] /export [path]
 /clear /debug
 A command that chooses from a list opens a picker when run without an
 argument: type to filter, arrows to move, Enter to pick.
@@ -1757,7 +1753,7 @@ impl App {
                     self.transcript.turn_note("provenance", &warning, true);
                     self.set_notice(
                         if approval_required {
-                            format!("{origin}: injection warning; approve the next sensitive action with /approve")
+                            format!("{origin}: injection warning; approve the next sensitive action with /permissions approve")
                         } else {
                             format!("{origin}: injection warning")
                         },

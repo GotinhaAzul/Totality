@@ -151,7 +151,7 @@ dispatch:
 - A hit adds a visible `[provenance]` warning to the tool result, records a
   `provenance-warning` entry, and requires approval for the next sensitive
   action: network access, a path outside the workspace, or a scope change.
-- Review the warning, then run `/approve` in the TUI to allow exactly the next
+- Review the warning, then run `/permissions approve` in the TUI to allow exactly the next
   sensitive action. It works while the model is still working, so its retry
   in the same turn goes through. Without approval the call returns `provenance_approval` and
   does not run. A frontend permission callback (ACP) can also be the approver.
@@ -165,7 +165,7 @@ dispatch:
 
 The detector is a speed bump, not a proof of safety. Encoded or paraphrased
 instructions may pass, and a warning only gates the next sensitive action.
-Headless runs have no `/approve`, so a warned sensitive action stays blocked
+Headless runs have no `/permissions approve`, so a warned sensitive action stays blocked
 there. `--sandbox` remains the process boundary.
 
 ## Findings

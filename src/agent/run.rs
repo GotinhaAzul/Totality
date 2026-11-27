@@ -3308,7 +3308,7 @@ async fn execute_batch(
                         result = ToolResult::err("permission_denied", message);
                     }
 
-                    // Provenance approval decided above: spend `/approve` or
+                    // Provenance approval decided above: spend `/permissions approve` or
                     // ask the frontend only now that the call can run.
                     if !result.is_error
                         && let Some(required) = pending_provenance.take()

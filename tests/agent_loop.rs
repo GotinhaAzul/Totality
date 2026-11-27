@@ -4735,7 +4735,7 @@ async fn malicious_readme_triggers_a_warning_and_an_approval_gate() {
         "{bash_content}"
     );
     assert!(bash_content.contains("needs approval"), "{bash_content}");
-    // Nothing can `/approve` in this run: the model is told to stop, not to
+    // Nothing can `/permissions approve` in this run: the model is told to stop, not to
     // retry a call that can only be denied again (#189).
     assert!(
         bash_content.contains("no interactive frontend") && bash_content.contains("Do not retry"),
@@ -4786,7 +4786,7 @@ async fn malicious_readme_triggers_a_warning_and_an_approval_gate() {
     assert_eq!(
         totality::provenance::check(&harness.core, &call, &call.arguments).await,
         totality::provenance::Gate::Allow,
-        "/approve permits exactly the next sensitive action"
+        "/permissions approve permits exactly the next sensitive action"
     );
     {
         let state = harness.core.provenance.lock().unwrap();
@@ -6026,7 +6026,7 @@ async fn a_provenance_warning_beats_an_allow_rule_and_a_gated_call_keeps_the_app
                 json!({"command": "cat ~/definitely-missing > provenance-ran.txt"}),
             ),
             text_script("waiting"),
-            // Turn 2, after /approve: an edit outside the workspace fails
+            // Turn 2, after /permissions approve: an edit outside the workspace fails
             // READ_FIRST, so it must not spend the approval; the next
             // sensitive call uses it.
             tool_script(

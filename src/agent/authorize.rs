@@ -15,7 +15,7 @@
 //! context: they never turn an `Ask` into an `Allow` or re-enable a tool.
 //! What still needs an answer (a policy `Ask`, a provenance approval) is
 //! resolved by [`confirm`] and [`confirm_provenance`] only after the harness
-//! gates pass, so the user is never asked about, and `/approve` is never
+//! gates pass, so the user is never asked about, and `/permissions approve` is never
 //! spent on, a call that would fail anyway.
 
 use serde_json::Value;
@@ -186,7 +186,7 @@ pub async fn decide(core: &Core, tool: &dyn Tool, call: &ToolCall, args: &Value)
 }
 
 /// Resolve a provenance requirement from [`decide`] once the harness gates
-/// passed: spend the user's `/approve` or ask the frontend approver.
+/// passed: spend the user's `/permissions approve` or ask the frontend approver.
 pub async fn confirm_provenance(
     core: &Core,
     call: &ToolCall,
