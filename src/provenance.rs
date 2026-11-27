@@ -682,12 +682,12 @@ impl ProvenanceState {
         self.pending.as_ref()
     }
 
-    /// Whether `/approve` already covered the next sensitive action.
+    /// Whether `/permissions approve` already covered the next sensitive action.
     pub fn is_approved(&self) -> bool {
         self.approved
     }
 
-    /// Mark the next sensitive action approved, from the TUI `/approve`.
+    /// Mark the next sensitive action approved, from the TUI `/permissions approve`.
     pub fn approve(&mut self) -> Option<PendingWarning> {
         let pending = self.pending.clone()?;
         self.approved = true;
@@ -853,12 +853,12 @@ pub enum Gate {
 /// A provenance approval one call needs before it may run: an untrusted
 /// warning is pending and the call is sensitive. Built by [`assess`] without
 /// changing any state, so a call that a later harness gate refuses never
-/// consumes the user's `/approve`.
+/// consumes the user's `/permissions approve`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Requirement {
     pub pending: PendingWarning,
     pub sensitivity: Sensitivity,
-    /// `/approve` already covers the next sensitive action.
+    /// `/permissions approve` already covers the next sensitive action.
     pub approved: bool,
 }
 
@@ -890,7 +890,7 @@ pub fn assess(core: &Core, call: &ToolCall, args: &Value) -> Option<Requirement>
 }
 
 /// Resolving half of the provenance gate, run once the harness gates passed.
-/// An explicit `/approve` (or a frontend approver) permits exactly this one
+/// An explicit `/permissions approve` (or a frontend approver) permits exactly this one
 /// sensitive action; nothing here can add a tool or widen a policy.
 pub async fn resolve(core: &Core, call: &ToolCall, args: &Value, required: Requirement) -> Gate {
     let Requirement {
@@ -939,13 +939,14 @@ pub async fn resolve(core: &Core, call: &ToolCall, args: &Value, required: Requi
         "requested",
         "no approver is attached",
     );
-    // `/approve` exists only where a person is at the keyboard (the TUI). A
+    // `/permissions approve` exists only where a person is at the keyboard (the TUI). A
     // headless run must not keep retrying a call nothing can approve.
     let how = if core.permissions.asker().is_some() {
-        "review the warning in the transcript, then approve with /approve in the TUI.".to_string()
+        "review the warning in the transcript, then approve with /permissions approve in the TUI."
+            .to_string()
     } else {
         format!(
-            "this run has no interactive frontend, so nothing can approve it in this session. Do not retry this or any other {} action; finish what you can without it, then report that it was blocked and that the user can rerun with --yolo or continue the session in the TUI and /approve it.",
+            "this run has no interactive frontend, so nothing can approve it in this session. Do not retry this or any other {} action; finish what you can without it, then report that it was blocked and that the user can rerun with --yolo or continue the session in the TUI and run /permissions approve.",
             sensitivity.label()
         )
     };
@@ -1152,7 +1153,7 @@ mod tests {
         assert_eq!(
             sensitivity(&call("git", rewrite.clone()), &rewrite, cwd),
             Some(Sensitivity::HistoryRewrite),
-            "a history rewrite needs /approve while an untrusted warning is pending"
+            "a history rewrite needs /permissions approve while an untrusted warning is pending"
         );
         assert_eq!(
             sensitivity(

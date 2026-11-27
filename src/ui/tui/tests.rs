@@ -1782,7 +1782,7 @@ async fn bare_rewind_opens_a_picker_of_messages() {
 }
 
 #[tokio::test]
-async fn approve_runs_while_the_model_is_working() {
+async fn permissions_approve_runs_while_the_model_is_working() {
     let (_dir, mut app) = test_app().await;
     app.turn_active = true;
     let notice = |app: &App| {
@@ -1792,12 +1792,21 @@ async fn approve_runs_while_the_model_is_working() {
             .unwrap_or_default()
     };
 
+    // The old spelling is gone and points to the new one.
     app.input.set_text("/approve");
+    app.handle_key(key(KeyCode::Enter)).await;
+    assert!(
+        notice(&app).contains("/permissions approve"),
+        "{}",
+        notice(&app)
+    );
+
+    app.input.set_text("/permissions approve");
     app.handle_key(key(KeyCode::Enter)).await;
     assert!(app.input.is_empty(), "the command was submitted");
     assert!(
         notice(&app).contains("nothing to approve"),
-        "/approve ran mid-turn: {}",
+        "/permissions approve ran mid-turn: {}",
         notice(&app)
     );
 
@@ -1815,7 +1824,7 @@ async fn approve_runs_while_the_model_is_working() {
             .unwrap()
             .note("tool:read", &detection);
     }
-    app.input.set_text("/approve");
+    app.input.set_text("/permissions approve");
     app.handle_key(key(KeyCode::Enter)).await;
     assert!(
         app.runtime

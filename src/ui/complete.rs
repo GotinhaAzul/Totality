@@ -505,6 +505,10 @@ fn complete_argument(
                 "no restrictions: no approvals, deny rules, or guards",
             ),
             Candidate::new("why", "which layer allowed or denied the last calls"),
+            Candidate::new(
+                "approve",
+                "allow the next sensitive action after a provenance warning",
+            ),
         ],
         ("pr", []) => vec![
             Candidate::new("confirm", "carry out the pending pull request action"),
@@ -728,7 +732,7 @@ mod tests {
         let completion = complete("/resume 2026", COMMANDS, &src, false).unwrap();
         assert_eq!(completion.candidates[0].description, "fix the parser");
 
-        // `/permissions` completes its five levels.
+        // `/permissions` completes its five levels, `why`, and `approve`.
         let completion = complete("/permissions d", COMMANDS, &src, false).unwrap();
         assert_eq!(values(&completion), vec!["deny-all"]);
         let completion = complete("/permissions ", COMMANDS, &src, false).unwrap();
@@ -740,7 +744,8 @@ mod tests {
                 "deny-all",
                 "skip-ask",
                 "yolo",
-                "why"
+                "why",
+                "approve"
             ]
         );
     }

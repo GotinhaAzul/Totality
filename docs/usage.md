@@ -239,7 +239,7 @@ Security is opt-in. The default `coding` profile has no security tools or postur
 
 Security work is for authorized labs, CTFs, and engagements only. Scope is set by the user with `/sec scope add|remove|clear`; there is no model tool for it. The scope gate blocks a known set of active-testing tools when no scope is set or when an extracted target is outside it. It is a speed bump; `--sandbox` is the process boundary.
 
-Repository files and tool output are tagged with their source. A cheap detector warns when untrusted content contains instruction-shaped phrases, and the next sensitive action needs `/approve`. Untrusted content cannot enable a tool, change scope, change the endpoint, or change permissions; that is enforced at dispatch, not in the prompt.
+Repository files and tool output are tagged with their source. A cheap detector warns when untrusted content contains instruction-shaped phrases, and the next sensitive action needs `/permissions approve`. Untrusted content cannot enable a tool, change scope, change the endpoint, or change permissions; that is enforced at dispatch, not in the prompt.
 
 - **Evidence.** `bash`, `bg`, and external tool runs append an evidence entry with target, command, timestamps, exit status, output artifact, and SHA-256. Secret values are redacted before session, artifact, evidence, finding, and report writes (never in what the model reads); `--no-redact` is the explicit, recorded opt-out.
 - **Surface.** `surface` parses nmap/HTTP/TLS output into one inventory; `attack_path` queries the graph derived from surface, findings, and evidence.

@@ -51,7 +51,6 @@ impl App {
             "skill" => self.command_skill(rest),
             "workflow" => self.command_workflow(rest).await,
             "sec" => self.command_sec(rest),
-            "approve" => self.command_approve(),
             "trust" => self.command_trust(rest).await,
             "verify" => self.command_verify(rest).await,
             "export" => self.command_export(rest),
@@ -106,6 +105,10 @@ impl App {
     }
 
     pub(super) fn unknown_command(&mut self, name: &str) {
+        if name == "approve" {
+            self.set_notice("/approve moved: use /permissions approve", Role::Warning);
+            return;
+        }
         let available: Vec<String> = COMMANDS
             .iter()
             .map(|(command, _)| format!("/{command}"))
@@ -574,6 +577,10 @@ impl App {
             self.open_picker(picker, "no permission levels");
             return;
         }
+        if argument == "approve" {
+            self.approve_provenance();
+            return;
+        }
         if argument == "why" {
             let Some(core) = self.core().cloned() else {
                 return;
@@ -586,7 +593,7 @@ impl App {
         }
         let Some(mode) = PermissionMode::parse(argument) else {
             self.set_notice(
-                "permissions: normal, accept-edits, deny-all, skip-ask, yolo, or why",
+                "permissions: normal, accept-edits, deny-all, skip-ask, yolo, why, or approve",
                 Role::Error,
             );
             return;
@@ -1216,7 +1223,9 @@ impl App {
     }
 
     /// Approve exactly the next sensitive action after a provenance warning.
-    pub(super) fn command_approve(&mut self) {
+    /// `/permissions approve`: permit exactly the next sensitive action
+    /// after a provenance warning.
+    pub(super) fn approve_provenance(&mut self) {
         let Some(runtime) = &self.runtime else {
             return;
         };

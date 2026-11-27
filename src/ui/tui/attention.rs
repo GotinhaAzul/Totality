@@ -113,7 +113,7 @@ impl App {
             return Some(Attention::new(
                 "Untrusted instructions",
                 format!("seen in {}", warning.origin),
-                "/approve allows the next sensitive action",
+                "/permissions approve allows the next sensitive action",
                 false,
             ));
         }
