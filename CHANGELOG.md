@@ -7,6 +7,13 @@ release may change defaults when the change is called out below.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-27
+
+A minor release bundling the interface and interaction work merged since
+0.3.0: `/settings`, `/copy` and `/scrollback`, queued messages mid-turn,
+richer permission answers, a live tail for `bash` calls, and a stronger
+weak-model probe.
+
 ### Added
 
 - Getting text out of the alternate screen (#197): `/copy` puts the last
@@ -788,6 +795,7 @@ packaging, and a local HTTP API. It includes all work merged in PRs
   event-log lock, and refuses a cross-root session-id collision instead of
   replacing the live entry ([PR #113](https://github.com/GotinhaAzul/LocalHarness/pull/113)).
 
-[Unreleased]: https://github.com/GotinhaAzul/Totality/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/GotinhaAzul/Totality/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/GotinhaAzul/Totality/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/GotinhaAzul/Totality/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/GotinhaAzul/LocalHarness/compare/v0.1.0...v0.2.0
