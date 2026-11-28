@@ -138,9 +138,10 @@ data: {"type":"text","text":"Hello"}
   `"type"` field of `tot --print --json`, and `data:` is the same JSON object.
   Both frontends render through one function (`src/events.rs`), so they cannot
   drift. The names are `started`, `state`, `text`, `reasoning`,
-  `tool_started`, `tool_finished`, `usage`, `context`, `window_detected`,
-  `compacted`, `provenance`, `hunk_review`, `notice`, `guard`, `error`, and
-  `done`, plus `cancelled`. As with `--json`, `cancelled` is emitted when a
+  `tool_started`, `tool_finished`, `tool_progress`, `usage`, `context`,
+  `window_detected`, `compacted`, `provenance`, `hunk_review`, `notice`,
+  `steered`, `discard`, `guard`, `error`, and `done`, plus `cancelled`. As
+  with `--json`, `cancelled` is emitted when a
   cancel is requested, and the turn's own `done` follows with
   `"status":"Cancelled"`.
 - **Text is passed through unchanged, as with `--json`.** Strip control

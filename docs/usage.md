@@ -170,13 +170,13 @@ The terminal interface is the default. It speaks in two voices: the model in Sko
 | `Enter` | send; during a turn, queue the message for the model's next step (shown as `queued` until delivered; `Up` on an empty prompt takes the newest back) |
 | `Ctrl+J` | newline |
 | `Esc` | cancel the current stream |
-| `Ctrl+C` | cancel a turn (again while cancelling to quit); idle, clear the prompt (Up recalls it); on an empty prompt, press twice to quit |
+| `Ctrl+C` | cancel a turn (again while cancelling to quit); idle, clear the prompt (Up recalls it); on an empty prompt, press twice within 1.5 s to quit |
 | `Ctrl+D` | quit when the input is empty |
 | `Up`/`Down` | walk prompt history from an empty prompt (keeps going while the recalled entry is unedited); otherwise cursor |
 | `Ctrl+R` | search prompt history; Enter puts the pick in the prompt |
 | `Ctrl+G` | edit the prompt in `$VISUAL` / `$EDITOR` |
 | `Ctrl+U` / `Ctrl+W` / `Ctrl+K` | kill to line start / word / to line end |
-| `Ctrl+_` or `Ctrl+Z` | undo (`Ctrl+Shift+Z` redo) |
+| `Ctrl+_` or `Ctrl+Z` | undo (`Ctrl+Shift+Z` or `Alt+Z` redo) |
 | `PgUp`/`PgDn`, `Home`/`End` | scroll transcript (`Home`/`End` only while the prompt is empty; `Ctrl+Home`/`Ctrl+End` always) |
 | `Ctrl+T` | toggle reasoning (`[ui] show_reasoning` is saved) |
 | `Alt+P` | show or hide the plan |

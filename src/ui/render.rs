@@ -165,6 +165,10 @@ pub struct Transcript {
     /// Indices into `turn` of notes pushed with [`Transcript::push_note`]
     /// during the live turn; they outlive it in `extra`.
     turn_notes: Vec<usize>,
+    /// Indices into `turn` of harness notes that are also session blocks
+    /// (a recorded notice or a compaction). They must count when a local
+    /// note is anchored, or the note lands above the step it followed.
+    turn_session_notes: Vec<usize>,
     /// `session.len()` when the live turn began.
     turn_base: usize,
     live_user: Option<Block>,
@@ -210,6 +214,7 @@ impl Transcript {
             banner: None,
             turn: Vec::new(),
             turn_notes: Vec::new(),
+            turn_session_notes: Vec::new(),
             turn_base: 0,
             live_user: None,
             live_assistant: None,
@@ -276,6 +281,7 @@ impl Transcript {
         self.extra.clear();
         self.turn.clear();
         self.turn_notes.clear();
+        self.turn_session_notes.clear();
         self.live_user = None;
         self.live_assistant = None;
         self.follow = true;
@@ -316,14 +322,21 @@ impl Transcript {
             let Some(note) = self.turn.get(index).cloned() else {
                 continue;
             };
-            // Notes are not session blocks, so they do not count.
+            // Local notes are not session blocks. Harness notes that were
+            // also recorded are, and must count, or the local note lands
+            // above the step it followed.
             let before = self.turn[..index]
                 .iter()
-                .filter(|block| !matches!(block.kind, BlockKind::Note { .. }))
+                .enumerate()
+                .filter(|(position, block)| {
+                    !matches!(block.kind, BlockKind::Note { .. })
+                        || self.turn_session_notes.contains(position)
+                })
                 .count();
             let anchor = self.turn_base + usize::from(self.live_user.is_some()) + before;
             self.insert_extra(anchor, note);
         }
+        self.turn_session_notes.clear();
     }
 
     pub fn begin_turn(&mut self, user_text: &str) {
@@ -504,11 +517,21 @@ impl Transcript {
         self.mark_tail_dirty();
     }
 
+    /// A harness note that is also written to the session (a recorded notice
+    /// or a compaction). It occupies a session block, so a later local note
+    /// must count it when choosing its anchor.
+    pub fn turn_note_recorded(&mut self, title: &str, body: &str, is_error: bool) {
+        self.turn_session_notes.push(self.turn.len());
+        self.turn.push(Block::note(title, body, is_error));
+        self.mark_tail_dirty();
+    }
+
     pub fn finish_turn(&mut self) {
         if !self.turn_notes.is_empty() {
             self.keep_turn_notes();
             self.mark_dirty();
         }
+        self.turn_session_notes.clear();
         self.turn.clear();
         self.turn_cache.clear();
         self.live_user = None;
@@ -2703,20 +2726,28 @@ mod tests {
         let mut transcript = Transcript::new(false);
         transcript.set_session(vec![Block::user("earlier")]);
         transcript.begin_turn("run touch new.txt");
+        // A guard nudge is also written to the session, between the prompt
+        // and the tool. The local note must count it when choosing an anchor.
+        transcript.turn_note_recorded("notice", "one_call reminder", false);
         transcript.tool_started("c1", "bash", "touch new.txt");
         transcript.push_note("permission · bash", "$ touch new.txt", false);
         transcript.prepare(80, &theme, false);
         let text = joined(transcript.lines());
         let prompt = text.find("run touch new.txt").unwrap();
+        let reminder = text.find("one_call reminder").unwrap();
         let tool = text.find("Bash").unwrap();
         let note = text.find("permission · bash").unwrap();
-        assert!(prompt < tool && tool < note, "{text}");
+        assert!(
+            prompt < reminder && reminder < tool && tool < note,
+            "{text}"
+        );
 
         // Committed: the note stays after the prompt and the tool row.
         transcript.finish_turn();
         transcript.set_session(vec![
             Block::user("earlier"),
             Block::user("run touch new.txt"),
+            Block::note("notice", "one_call reminder", false),
             Block::tool(
                 Some("c1".into()),
                 "bash",
@@ -2732,10 +2763,14 @@ mod tests {
         transcript.prepare(80, &theme, false);
         let text = joined(transcript.lines());
         let prompt = text.find("run touch new.txt").unwrap();
+        let tool = text.find("Bash").unwrap();
         let note = text.find("permission · bash").unwrap();
         let done = text.find("done").unwrap();
         let later = text.find("after the turn").unwrap();
-        assert!(prompt < note && note < done && done < later, "{text}");
+        assert!(
+            prompt < tool && tool < note && note < done && done < later,
+            "{text}"
+        );
     }
 
     #[test]

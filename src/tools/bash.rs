@@ -2,8 +2,8 @@
 
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -225,8 +225,9 @@ impl BashTool {
             Outcome::Cancelled => (terminate_group(&mut child).await, false, true),
         };
 
-        let stdout = collect(stdout_task).await;
-        let stderr = collect(stderr_task).await;
+        // Drain both streams together: one stray grandchild must not add a
+        // second grace period to the other stream.
+        let (stdout, stderr) = tokio::join!(collect(stdout_task), collect(stderr_task));
         let exit_code = status.and_then(|status| status.code());
 
         let body = render_preview(&stdout, &stderr);
@@ -355,7 +356,15 @@ fn cancelled_result() -> ToolResult {
     }
 }
 
-pub(crate) fn spawn_reader<R>(reader: Option<R>, captured: Arc<AtomicUsize>) -> JoinHandle<Vec<u8>>
+/// A reader task plus the bytes it has already produced. The shared buffer
+/// survives an abort, so a cancelled or timed-out command keeps the output
+/// it printed before the pipe was orphaned.
+pub(crate) struct ReaderTask {
+    handle: JoinHandle<Vec<u8>>,
+    seen: Arc<Mutex<Vec<u8>>>,
+}
+
+pub(crate) fn spawn_reader<R>(reader: Option<R>, captured: Arc<AtomicUsize>) -> ReaderTask
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
@@ -367,16 +376,17 @@ pub(crate) fn spawn_reader_live<R>(
     reader: Option<R>,
     captured: Arc<AtomicUsize>,
     live: Option<crate::tools::live::LiveTail>,
-) -> JoinHandle<Vec<u8>>
+) -> ReaderTask
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
-    tokio::spawn(async move {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let task_seen = seen.clone();
+    let handle = tokio::spawn(async move {
         let Some(mut reader) = reader else {
             return Vec::new();
         };
         use tokio::io::AsyncReadExt;
-        let mut out = Vec::new();
         // What did not fit the head: the last TAIL_CAPTURE_BYTES of it, and
         // how much was dropped in between.
         let mut tail = std::collections::VecDeque::<u8>::new();
@@ -391,7 +401,9 @@ where
                     }
                     let previous = captured.fetch_add(n, Ordering::SeqCst);
                     let take = n.min(MAX_CAPTURE_BYTES.saturating_sub(previous));
+                    let mut out = task_seen.lock().expect("reader buffer");
                     out.extend_from_slice(&buf[..take]);
+                    drop(out);
                     tail.extend(&buf[take..n]);
                     if tail.len() > TAIL_CAPTURE_BYTES {
                         let excess = tail.len() - TAIL_CAPTURE_BYTES;
@@ -401,23 +413,26 @@ where
                 }
             }
         }
+        let mut out = task_seen.lock().expect("reader buffer");
         if dropped > 0 {
             out.extend_from_slice(
                 format!("\n[... {dropped} bytes of output omitted ...]\n").as_bytes(),
             );
         }
         out.extend(tail);
-        out
-    })
+        out.clone()
+    });
+    ReaderTask { handle, seen }
 }
 
 /// Await a reader, but never block on a pipe held open by a stray grandchild.
-pub(crate) async fn collect(mut handle: JoinHandle<Vec<u8>>) -> Vec<u8> {
+pub(crate) async fn collect(task: ReaderTask) -> Vec<u8> {
+    let ReaderTask { mut handle, seen } = task;
     tokio::select! {
         result = &mut handle => result.unwrap_or_default(),
         _ = tokio::time::sleep(TERM_GRACE) => {
             handle.abort();
-            Vec::new()
+            seen.lock().map(|bytes| bytes.clone()).unwrap_or_default()
         }
     }
 }

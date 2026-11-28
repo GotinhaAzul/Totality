@@ -1705,7 +1705,7 @@ input characters. Missing input and unreadable files return prescriptive errors.
   `provenance-warning` custom entry, and records a pending approval in
   `Core::provenance`. The next sensitive action — network, outside-workspace
   path, external tool, or scope change — returns `provenance_approval` unless
-  the user approves with `/approve` or a frontend approver allows it. Approval
+  the user approves with `/permissions approve` or a frontend approver allows it. Approval
   covers exactly one action.
 - A tool result can never enable a tool, change the tool set, widen scope,
   change the endpoint, or change the permission mode. Hooks and provenance can
@@ -1721,7 +1721,7 @@ pass. Lifecycle hooks and provenance checks add their inputs inside `decide`
 so the loop keeps one decision point: policy first (a deny skips the hooks),
 then `pre_tool` hooks (block or add context), then provenance. A deny from any
 source wins; hooks and provenance never turn an ask into an allow. A
-provenance approval that something could still grant (`/approve` already
+provenance approval that something could still grant (`/permissions approve` already
 given, or a frontend approver attached) is resolved by
 `authorize::confirm_provenance` after the gates, so a call that fails
 `READ_FIRST` or scope never spends the approval.
@@ -1852,7 +1852,7 @@ cursor = "#c0caf5"
 - Diff fences and diff-like tool output: added lines green, removed red, hunk
   headers accent, context muted.
 - Reasoning: muted block, collapsed by default, token count shown.
-  `Ctrl+R` toggles and writes `[ui] show_reasoning`.
+  `Ctrl+T` toggles and writes `[ui] show_reasoning`.
 - Tool cards: border by status, tool name, one-line argument summary, duration,
   output preview, expand key.
 - Errors: red card with code, message, and next action.
@@ -1901,7 +1901,7 @@ cursor = "#c0caf5"
 - `Enter` sends. `Ctrl+J` inserts a newline. `Esc` cancels the current stream.
 - `Up`/`Down` recall history when the input is empty; otherwise they move the
   cursor within the textarea.
-- `Ctrl+C` cancels the current run; a second `Ctrl+C` quits.
+- `Ctrl+C` cancels the current run; a second `Ctrl+C` within 1.5 s quits.
 - `Ctrl+D` quits when the input is empty.
 - `Ctrl+L` redraws the whole screen.
 - Slash commands: `/help`, `/quit`, `/login`, `/model`, `/profile`, `/theme`,
@@ -1918,7 +1918,7 @@ cursor = "#c0caf5"
   session.
 - Settings changed from the TUI persist to the global config:
   `/theme <name>` and a confirmed theme pick write `[ui] theme`, a successful
-  `/profile` switch writes `default_profile`, and `Ctrl+R` writes
+  `/profile` switch writes `default_profile`, and `Ctrl+T` writes
   `[ui] show_reasoning`. `config::save_setting` merges into the existing TOML,
   replaces the file atomically, keeps its mode, and creates a new file `0600`.
   A failed save warns and keeps the in-memory change. `/permissions` stays
@@ -2100,7 +2100,7 @@ first_token_timeout_secs = 120
 [ui]
 theme = "default"               # /theme <name> writes it
 color_mode = "auto"
-show_reasoning = false          # Ctrl+R writes it
+show_reasoning = false          # Ctrl+T writes it
 show_token_counts = true
 
 [session]

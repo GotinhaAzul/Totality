@@ -256,7 +256,8 @@ and why the saved value may not be the one in use (an environment variable or
 the project config overriding it). Left/Right switch tabs, Tab jumps to the
 next section, and typing searches every tab. Enter toggles a boolean, opens a
 value list for a fixed choice, or puts `/settings <key> <current value>` in
-the prompt to edit; after a change the view opens again on the same key.
+the prompt to edit. A change picked from the value list reopens the view on
+the same key; a value typed in the prompt does not.
 `ui.theme`, `model.model`, and `default_profile` go through `/theme`, `/model`,
 and `/profile`. Secrets are never shown, only `(set)` or `(empty)`.
 
@@ -618,10 +619,11 @@ continues. In the TUI an `ask` shows the exact command or path, with a diff for
 file edits, and a numbered list of answers in the footer: **yes** (this exact
 call), **session: `<pattern>`** (allow a family of calls for the rest of the
 session), **always** (when a rule is suggested, below), and **no**. Up/Down and
-Enter pick, as do the number keys. `y`/`n`/`s`/`a` also answer, but only as the
-first key on an empty prompt once the question has been up for a moment, so a
-sentence you were typing when it appeared goes into the prompt instead of
-approving anything. Typing a message adds **no + send message**, which becomes
+Enter pick. The selection starts on **no**, so a stray Enter denies rather
+than approves. `Alt+y`/`Alt+n` allow or deny, `Alt+s` allows the session
+pattern, and `Alt+a` saves the suggested rule; bare letters and digits always
+go into the prompt, so a message that starts with a shortcut letter is never
+mistaken for an answer. Typing a message adds **no + send message**, which becomes
 Enter's default: the call is denied and your message goes into the tool result
 the model sees, so it knows what to do instead. `Esc` denies and keeps the
 draft. An exact approval covers exactly that command or path for the rest of
@@ -638,7 +640,9 @@ offered for such a command, for `VAR=value cmd`, or for `./script`. Patterns
 only turn an `ask` into an allow: deny rules, guards, and the other levels are
 unchanged. They live in memory; `/permissions rules` lists them (numbered)
 next to the saved rules, and `/permissions forget <n|all>` removes them
-(`all` also drops this session's exact approvals). Headless runs cannot ask, so
+(`all` also drops this session's exact approvals). A policy rebuild (for
+example `/trust confirm`) starts with no session patterns, the same
+fail-closed default as exact approvals. Headless runs cannot ask, so
 an `ask` is denied there; use `--mode accept-edits`, allow rules, `--skip-ask`,
 or `--yolo`. A provenance approval cannot be given there either: the call is
 denied and the model is told to stop and report it; only `--yolo` runs it.

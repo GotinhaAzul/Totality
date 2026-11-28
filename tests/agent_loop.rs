@@ -1257,7 +1257,7 @@ async fn output_limit_cut_tool_call_is_nudged_and_the_turn_continues() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, AgentEvent::Notice(n) if n.contains("cut off")))
+            .any(|e| matches!(e, AgentEvent::RecordedNotice(n) if n.contains("cut off")))
     );
     // The prose that streamed before the cut is kept with the real stop
     // reason; the unusable call is not.
@@ -6918,6 +6918,14 @@ async fn a_message_queued_mid_turn_reaches_the_model_after_the_tool_batch() {
         users.last().map(String::as_str),
         Some("also update the README")
     );
+    // Stored is not enough: the second request must actually carry it.
+    let requests = harness.provider.requests.lock().unwrap();
+    assert!(
+        requests.iter().any(|request| request.messages.iter().any(|message| {
+            matches!(message, ChatMessage::User { content, .. } if content.contains("also update the README"))
+        })),
+        "the steer must reach the provider, not just the session: {requests:?}"
+    );
     assert!(harness.core.queued_steering().is_empty());
 }
 
@@ -6953,4 +6961,34 @@ async fn cancelling_a_running_bash_call_keeps_what_it_printed() {
             matches!(event, AgentEvent::ToolProgress { ref tail, .. } if tail.contains("tick"));
     }
     assert!(progress, "the frontend saw the live tail");
+}
+
+#[tokio::test]
+async fn cancelling_during_a_tool_keeps_the_queued_message_for_the_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = harness(
+        dir.path(),
+        vec![
+            tool_script("bash", json!({"command": "sleep 2"})),
+            text_script("unused"),
+        ],
+        &["bash"],
+    );
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let core = harness.core.clone();
+    let stop = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        core.steer("next instruction".into());
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        stop.cancel();
+    });
+    let outcome = run_turn(harness.core.clone(), "start".into(), tx, cancel).await;
+    assert_eq!(outcome.status, TurnStatus::Cancelled);
+    assert_eq!(
+        harness.core.queued_steering(),
+        vec!["next instruction".to_string()],
+        "a cancelled turn must leave the queue for the prompt"
+    );
 }

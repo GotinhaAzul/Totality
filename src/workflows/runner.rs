@@ -148,7 +148,7 @@ impl StepExecutor for AgentExecutor {
                         }
                     });
                 }
-                AgentEvent::Notice(message) => {
+                AgentEvent::Notice(message) | AgentEvent::RecordedNotice(message) => {
                     let value = json!({"type":"notice","message":message});
                     self.say(value, || eprintln!("[notice] {message}"));
                 }

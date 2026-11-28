@@ -189,7 +189,7 @@ Tab complete commands, arguments, and paths · Shift+Tab previous choice
 [Pasted text #1 +N lines] and is sent in full; Alt+E expands it for editing
 Ctrl+T show thinking · Ctrl+O expand tool output · Alt+P toggle the plan
 Up/Down walk prompt history · Ctrl+R search it · Ctrl+G edit in $EDITOR
-Ctrl+U clear to line start · Ctrl+W/Ctrl+K kill word/to end · Ctrl+_ or Ctrl+Z undo
+Ctrl+U clear to line start · Ctrl+W/Ctrl+K kill word/to end · Ctrl+_ or Ctrl+Z undo · Alt+Z redo
 Ctrl+L redraw the screen (if it ever looks garbled)
 Scroll: mouse wheel · PgUp/PgDn half page · Shift+Up/Down one line
 Home/End top and bottom (prompt empty) · Ctrl+Home/End anytime
@@ -300,9 +300,11 @@ pub async fn run(runtime: Runtime, options: UiOptions) -> Result<()> {
     std::thread::spawn(move || {
         loop {
             if INPUT_PAUSED.load(Ordering::SeqCst) {
+                INPUT_STOPPED.store(true, Ordering::SeqCst);
                 std::thread::sleep(INPUT_POLL);
                 continue;
             }
+            INPUT_STOPPED.store(false, Ordering::SeqCst);
             match event::poll(INPUT_POLL) {
                 Ok(true) => match event::read() {
                     Ok(ev) => {
@@ -526,7 +528,7 @@ struct App {
     hunk_edit: Option<HunkEdit>,
     /// Clear the screen and repaint every cell on the next frame.
     repaint: bool,
-    /// A permission question from the running turn, waiting for y/n.
+    /// A permission question from the running turn, waiting for an answer.
     pending_ask: Option<permission::PendingAsk>,
     /// Selection and timing for the open question.
     ask_ui: permission::AskUi,
@@ -1501,6 +1503,20 @@ impl App {
             self.notice = None;
             changed = true;
         }
+        // The quit hint must not outlive the window it describes.
+        if let Some(at) = self.quit_armed
+            && at.elapsed() > QUIT_CONFIRM_WINDOW
+        {
+            self.quit_armed = None;
+            if self
+                .notice
+                .as_ref()
+                .is_some_and(|(text, ..)| text == "press Ctrl+C again to exit")
+            {
+                self.notice = None;
+                changed = true;
+            }
+        }
         let before = (self.tok_s, self.header.completion);
         let now = Instant::now();
         while let Some((at, _)) = self.token_events.front() {
@@ -1837,7 +1853,7 @@ impl App {
                     &summary.split_whitespace().collect::<Vec<_>>().join(" "),
                     160,
                 );
-                self.transcript.turn_note(
+                self.transcript.turn_note_recorded(
                     "compacted",
                     &format!("{tokens_before} tokens before · {preview}"),
                     false,
@@ -1845,6 +1861,11 @@ impl App {
             }
             AgentEvent::Notice(message) => {
                 self.transcript.turn_note("notice", &message, false);
+                self.set_notice(message, Role::Muted);
+            }
+            AgentEvent::RecordedNotice(message) => {
+                self.transcript
+                    .turn_note_recorded("notice", &message, false);
                 self.set_notice(message, Role::Muted);
             }
             AgentEvent::HunkReview { id, hunks } => {

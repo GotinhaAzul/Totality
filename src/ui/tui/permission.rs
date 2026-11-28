@@ -40,10 +40,6 @@ impl Asker for TuiAsker {
     }
 }
 
-/// How long a question must be on screen before a bare `y`/`n`/digit
-/// answers it; keys typed sooner go to the prompt.
-const ANSWER_DEBOUNCE: Duration = Duration::from_millis(400);
-
 /// One answer the user can pick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Choice {
@@ -55,26 +51,12 @@ pub(super) enum Choice {
 }
 
 /// Selection state for the open question.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct AskUi {
-    pub shown: Instant,
     pub selected: usize,
     /// The user moved the selection; a draft no longer re-selects the
     /// "tell the model" answer.
     pub moved: bool,
-    /// Something was typed into the prompt since the question appeared.
-    pub typed: bool,
-}
-
-impl Default for AskUi {
-    fn default() -> Self {
-        Self {
-            shown: Instant::now(),
-            selected: 0,
-            moved: false,
-            typed: false,
-        }
-    }
 }
 
 /// The transcript text for a question: the exact subject, then the preview,
@@ -184,16 +166,20 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// The highlighted answer: "tell the model" once a draft exists, unless
-    /// the user moved the selection.
+    /// The highlighted answer. Without an explicit move the default is
+    /// fail-closed: "tell the model" once a draft exists, otherwise "no".
+    /// A stray Enter therefore denies instead of allowing the call.
     pub(super) fn ask_selected(&self) -> usize {
         let choices = self.ask_choices();
-        if !self.ask_ui.moved
-            && let Some(index) = choices
-                .iter()
-                .position(|(choice, _)| *choice == Choice::DenyWithNote)
-        {
-            return index;
+        if !self.ask_ui.moved {
+            let default = if self.input.is_empty() {
+                Choice::Deny
+            } else {
+                Choice::DenyWithNote
+            };
+            if let Some(index) = choices.iter().position(|(choice, _)| *choice == default) {
+                return index;
+            }
         }
         self.ask_ui.selected.min(choices.len().saturating_sub(1))
     }
@@ -268,10 +254,11 @@ impl App {
     }
 
     /// Keys while a question is open. Up/Down move the selection, Enter
-    /// picks it, Esc denies (keeping any draft). A bare `y`, `n`, `a`, `s`,
-    /// or digit answers only on an empty prompt, as the first key after the
-    /// question has been up for [`ANSWER_DEBOUNCE`]. Every other key edits
-    /// the prompt as usual (returns false), so nothing typed is lost.
+    /// picks it, Esc denies (keeping any draft). `Alt+y`/`Alt+n` allow or
+    /// deny, `Alt+s` allows the session pattern, and `Alt+a` saves the
+    /// suggested rule. Bare letters, digits, and every other key edit the
+    /// prompt as usual (returns false), so a message that starts with a
+    /// shortcut letter is never mistaken for an answer.
     pub(super) fn handle_permission_key(&mut self, key: &KeyEvent) -> bool {
         if self.pending_ask.is_none() {
             return false;
@@ -299,20 +286,13 @@ impl App {
                 self.answer_permission(AskAnswer::Deny);
                 true
             }
-            KeyCode::Char(ch) if !modified || ch.is_ascii_uppercase() => {
-                let ready = self.input.is_empty()
-                    && !self.ask_ui.typed
-                    && self.ask_ui.shown.elapsed() >= ANSWER_DEBOUNCE;
+            KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::ALT) => {
                 let has = |wanted: Choice| choices.iter().any(|(choice, _)| *choice == wanted);
                 let picked = match ch.to_ascii_lowercase() {
-                    _ if !ready => None,
                     'y' => Some(Choice::Allow),
                     'n' => Some(Choice::Deny),
                     'a' if has(Choice::AllowAlways) => Some(Choice::AllowAlways),
                     's' if has(Choice::AllowSession) => Some(Choice::AllowSession),
-                    digit @ '1'..='9' => choices
-                        .get(digit as usize - '1' as usize)
-                        .map(|(choice, _)| *choice),
                     _ => None,
                 };
                 match picked {
@@ -320,15 +300,21 @@ impl App {
                         self.answer_choice(choice);
                         true
                     }
-                    None => {
-                        self.ask_ui.typed = true;
-                        false
-                    }
+                    // Leave other Alt chords (Alt+E, Alt+P) to their handlers.
+                    None => false,
                 }
             }
             _ => {
-                if matches!(key.code, KeyCode::Backspace | KeyCode::Delete) {
-                    self.ask_ui.typed = true;
+                // Typing is a stronger signal than an earlier arrow: the
+                // draft becomes Enter's fail-closed "no + send message"
+                // answer again.
+                if matches!(
+                    key.code,
+                    KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
+                ) && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                {
+                    self.ask_ui.moved = false;
                 }
                 false
             }

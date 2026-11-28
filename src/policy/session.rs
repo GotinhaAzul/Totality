@@ -5,7 +5,8 @@
 //! the user is looking at: a command's leading words (`cargo test *`), a
 //! fetch's site, or the directory an edit touches (`edits under src/`). It
 //! only turns an `Ask` into an `Allow`; deny rules, guards, and the other
-//! modes are unaffected, and nothing is written to disk.
+//! modes are unaffected, and the pattern itself is never written to disk
+//! (the exact call is still counted for the `always` suggestion).
 
 use super::{CallFacts, Effect};
 

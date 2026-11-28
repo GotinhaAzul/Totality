@@ -7,24 +7,6 @@ release may change defaults when the change is called out below.
 
 ## [Unreleased]
 
-### Fixed
-
-- Cancelling a running `bash` call keeps what it printed: the result is
-  marked partial instead of being replaced by `cancelled during execution`
-  (#201).
-
-- Typing while a permission question is open no longer drops the text, and a
-  `y` or `n` in a sentence no longer answers it (#193). Keys go to the
-  prompt; the question is answered by Up/Down + Enter or the number keys, and
-  a bare `y`/`n` counts only as the first key on an empty prompt after the
-  question has been up for 400 ms.
-
-- A permission question, warning, or other note raised during a turn renders
-  below the prompt and the running tool that caused it, and stays there
-  after the turn, instead of above the prompt (#200).
-- Pasting text whose lines end in a lone CR (tmux's `paste-buffer`, some
-  terminals, old Mac text) keeps every line instead of only the last (#195).
-
 ### Added
 
 - Getting text out of the alternate screen (#197): `/copy` puts the last
@@ -56,46 +38,6 @@ release may change defaults when the change is called out below.
 - A paste over eight lines or 1000 characters shows as a `[Pasted text #1
   +120 lines]` chip in the prompt; the full text is sent and kept in history,
   and `Alt+E` expands it for editing (#195).
-
-### Changed
-
-- `/settings` is a full-screen view: category tabs across the top, the tab's
-  sections on the left, keys and values grouped under section headings, a
-  description line with when a change applies and what overrides it, and a
-  key-hint footer. Left/Right switch tabs, Tab jumps sections, typing
-  searches every tab.
-
-- Prompt editing (#199): Up/Down keep walking history while the recalled
-  entry is unedited (Up used to stop at the newest prompt); **Ctrl+R now
-  searches prompt history**, so the thinking toggle moves to **Ctrl+T** and
-  the plan toggle to **Alt+P**; Ctrl+U clears to the line start as in
-  readline (undo is Ctrl+_ or Ctrl+Z, redo Ctrl+Shift+Z); Ctrl+G edits the
-  prompt in `$VISUAL`/`$EDITOR`; the scrolled-up footer names End or
-  Ctrl+End, whichever works with the prompt as it is.
-- Ctrl+C on an idle prompt clears the draft (Up recalls it) instead of
-  quitting; on an empty prompt it asks for a second press within 1.5 s (#198).
-- `/approve` is now `/permissions approve`, next to the other permission
-  controls. It still runs while the model is working and still permits
-  exactly the next sensitive action after a provenance warning; `/permissions
-  why` also runs mid-turn now. Typing `/approve` points to the new spelling.
-- Hunk review is off by default (`review = "off"`): edits land immediately,
-  and the undo log and `/rewind` still cover them. Set `review = "auto"` (or
-  `/settings review auto`) for the previous pause before risky or multi-file
-  edits.
-
-- `--yolo` is now unrestricted: besides approvals, it turns off deny rules,
-  the provenance approval after an injection warning (the warning is still
-  shown, and the bypass is recorded as a `provenance-approval` entry with
-  `decision: "bypassed"`), and the destructive git guard in `bash`/`bg`. The
-  sandbox, path jail, engagement scope, and hooks keep their own settings.
-  The old behavior is the new `skip-ask` level.
-- A headless run that hits a provenance approval no longer tells the model to
-  `/approve` in a TUI it does not have: the denial says nothing in this run
-  can approve it, not to retry, and to report it, so the turn ends instead of
-  looping until the stall guard
-  ([#189](https://github.com/GotinhaAzul/LocalHarness/issues/189)).
-
-### Added
 
 - `/settings`: one list of every configurable key with its current value and
   what it does. Enter toggles, picks, or edits; the change is validated,
@@ -154,6 +96,43 @@ release may change defaults when the change is called out below.
 
 ### Changed
 
+- `/settings` is a full-screen view: category tabs across the top, the tab's
+  sections on the left, keys and values grouped under section headings, a
+  description line with when a change applies and what overrides it, and a
+  key-hint footer. Left/Right switch tabs, Tab jumps sections, typing
+  searches every tab.
+
+- Prompt editing (#199): Up/Down keep walking history while the recalled
+  entry is unedited (Up used to stop at the newest prompt); **Ctrl+R now
+  searches prompt history**, so the thinking toggle moves to **Ctrl+T** and
+  the plan toggle to **Alt+P**; Ctrl+U clears to the line start as in
+  readline (undo is Ctrl+_ or Ctrl+Z, redo Ctrl+Shift+Z or Alt+Z, which works
+  on terminals that cannot report Shift); Ctrl+G edits the
+  prompt in `$VISUAL`/`$EDITOR`; the scrolled-up footer names End or
+  Ctrl+End, whichever works with the prompt as it is.
+- Ctrl+C on an idle prompt clears the draft (Up recalls it) instead of
+  quitting; on an empty prompt it asks for a second press within 1.5 s (#198).
+- `/approve` is now `/permissions approve`, next to the other permission
+  controls. It still runs while the model is working and still permits
+  exactly the next sensitive action after a provenance warning; `/permissions
+  why` also runs mid-turn now. Typing `/approve` points to the new spelling.
+- Hunk review is off by default (`review = "off"`): edits land immediately,
+  and the undo log and `/rewind` still cover them. Set `review = "auto"` (or
+  `/settings review auto`) for the previous pause before risky or multi-file
+  edits.
+
+- `--yolo` is now unrestricted: besides approvals, it turns off deny rules,
+  the provenance approval after an injection warning (the warning is still
+  shown, and the bypass is recorded as a `provenance-approval` entry with
+  `decision: "bypassed"`), and the destructive git guard in `bash`/`bg`. The
+  sandbox, path jail, engagement scope, and hooks keep their own settings.
+  The old behavior is the new `skip-ask` level.
+- A headless run that hits a provenance approval no longer tells the model to
+  `/approve` in a TUI it does not have: the denial says nothing in this run
+  can approve it, not to retry, and to report it, so the turn ends instead of
+  looping until the stall guard
+  ([#189](https://github.com/GotinhaAzul/LocalHarness/issues/189)).
+
 - One progress ledger replaces the stall guard, the three tool-family
   counters, the duplicate-result counter, and the checkpoints' own progress
   windows ([#169](https://github.com/GotinhaAzul/Totality/issues/169)). Every
@@ -173,6 +152,48 @@ release may change defaults when the change is called out below.
   `eval` text, and
   the refusal names `rewrite_history` instead of
   telling the model to ask a user a headless session does not have.
+
+### Fixed
+
+- Cancelling a running `bash` call keeps what it printed: the result is
+  marked partial instead of being replaced by `cancelled during execution`
+  (#201).
+
+- Typing while a permission question is open no longer drops the text, and a
+  `y` or `n` in a sentence no longer answers it (#193). Every bare letter or
+  digit goes to the prompt; `Alt+y`/`Alt+n` allow or deny, `Alt+s` allows the
+  session pattern, `Alt+a` saves the suggested rule, and Up/Down + Enter pick.
+  The initial selection is **no**, so a stray Enter denies instead of
+  approving.
+
+- A permission question, warning, or other note raised during a turn renders
+  below the prompt and the running tool that caused it, and stays there
+  after the turn, instead of above the prompt (#200).
+- Pasting text whose lines end in a lone CR (tmux's `paste-buffer`, some
+  terminals, old Mac text) keeps every line instead of only the last (#195).
+
+- Editing a paste chip expands the pasted text instead of sending a broken
+  `[Pasted text …]` marker with the content dropped; duplicated chips all
+  expand, and trailing blank lines count toward the collapse threshold.
+- A note raised after a recorded harness notice (a guard nudge, a compaction)
+  keeps its place below the tool that caused it instead of jumping above it.
+- Cancelling during a running tool no longer consumes a queued message: it is
+  left for the prompt, where a cancelled turn restores it. A queued message
+  also resolves `@path` attachments and runs the `user_prompt` hook.
+- `/copy code` understands nested and tilde fences and an unterminated final
+  block, instead of copying an empty string or an earlier snippet.
+- A cancelled `bash` call keeps the output already read even when a stray
+  grandchild still holds the pipe, and a non-`bash` call is not polled once
+  more after cancel.
+- The settings screen says so and ignores keys below 30×10 instead of acting
+  on an invisible list; a failed save leaves the warning visible. Up/Down
+  walk soft-wrapped prompt history by visual row, Ctrl+G cannot quit the TUI
+  through the editor's Ctrl+C, Ctrl+R keeps the hidden history draft, Ctrl+U
+  does nothing at the start of a line, and a quit hint expires with its 1.5 s
+  window. Stashed drafts reach `prompt_history.jsonl` when finally sent.
+- `/permissions rules` says last matching rule wins, matching the evaluator,
+  and the stale `/approve`/`Ctrl+R` references in `ARCHITECTURE.md` are
+  updated.
 
 ## [0.3.0] - 2026-11-19
 

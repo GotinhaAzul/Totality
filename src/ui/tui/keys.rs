@@ -24,7 +24,6 @@ impl App {
     /// hunk is open for editing, where the text itself is what is edited).
     pub(super) fn handle_paste(&mut self, text: &str) {
         let text = crate::sanitize::paste(text);
-        self.ask_ui.typed = true;
         if self.hunk_edit.is_some() {
             self.input.insert_text(&text);
             return;
@@ -61,9 +60,11 @@ impl App {
                 }
             })
             .collect();
-        if !self.input.is_empty() {
+        // Keep a real draft one Up away without discarding the draft saved by
+        // Up/Down browsing. A recalled entry is already in history.
+        if !self.input.is_empty() && !self.input.on_recalled_entry() {
             let draft = self.input.expanded_text();
-            self.input.stash_in_history(&draft);
+            self.input.stash_in_history_keep_draft(&draft);
         }
         self.open_picker(
             PickerModal::new("history", "Prompt history", items, ""),
@@ -84,6 +85,8 @@ impl App {
         let draft = self.input.expanded_text();
         let result = suspend_terminal(|| edit_in_editor(&editor, &draft));
         self.repaint = true;
+        // The terminal restore popped the title stack; send ours again.
+        self.title.clear();
         match result {
             Ok(text) => {
                 self.input.set_text(&text);
@@ -139,6 +142,13 @@ impl App {
             return;
         }
         self.quit_armed = None;
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|(text, ..)| text == "press Ctrl+C again to exit")
+        {
+            self.notice = None;
+        }
         if ctrl && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D')) {
             if self.input.is_empty() && !self.turn_active {
                 self.quit = true;
@@ -326,6 +336,20 @@ impl App {
                     let value = completion.candidates[index].value.clone();
                     self.input.replace_before_cursor(completion.start, &value);
                 }
+                // Never send a chip marker whose text is no longer attached.
+                // Recover the text and make the user press Enter again.
+                if self.input.has_broken_paste() {
+                    let recovered = self.input.repair_pastes();
+                    self.set_notice(
+                        if recovered {
+                            "the edited paste was expanded; press Enter again to send"
+                        } else {
+                            "a paste chip was edited beyond recovery; clear the prompt and paste again"
+                        },
+                        Role::Warning,
+                    );
+                    return;
+                }
                 // While a switch loads, prose stays in the prompt (commands
                 // still run) so nothing typed ahead is lost.
                 let text = self.input.text();
@@ -434,6 +458,17 @@ impl App {
         let mut preview_theme: Option<String> = None;
         let mut review_submit: Option<(u64, crate::tools::hunk::HunkDecision)> = None;
         let mut review_edit: Option<(u64, usize)> = None;
+
+        // The screen is not drawn at this size; do not let keys act on it.
+        if let ModalData::Settings(view) = &modal
+            && view.too_small.get()
+        {
+            if key.code == KeyCode::Esc {
+                return;
+            }
+            self.modal = Some(modal);
+            return;
+        }
 
         match &mut modal {
             ModalData::Tree(view) => match key.code {
@@ -660,7 +695,7 @@ impl App {
                 }
                 PickAction::Fill(text) => {
                     self.restore_previewed_theme();
-                    self.input.set_text(&text);
+                    self.input.fill_history_entry(&text);
                 }
             }
             return;

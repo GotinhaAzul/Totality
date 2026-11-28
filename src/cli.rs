@@ -2081,7 +2081,9 @@ fn render_event(
                 eprintln!("[ok] {name}");
             }
         }
-        AgentEvent::Notice(message) => eprintln!("[notice] {message}"),
+        AgentEvent::Notice(message) | AgentEvent::RecordedNotice(message) => {
+            eprintln!("[notice] {message}")
+        }
         AgentEvent::Steered(text) => eprintln!("[you] {text}"),
         AgentEvent::ToolProgress { .. } => {}
         AgentEvent::Provenance {

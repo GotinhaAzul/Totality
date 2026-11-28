@@ -32,9 +32,13 @@ pub struct InputState {
     /// restarts. `None` keeps history in memory only.
     history_file: Option<PathBuf>,
     /// Collapsed pastes in the prompt: the chip shown and the text it stands
-    /// for. A chip the user edits away simply no longer expands.
+    /// for. Editing a chip expands it first, so the text is never lost.
     pastes: Vec<(String, String)>,
     paste_seq: usize,
+    /// Texts kept in memory by Ctrl+C or the history picker that have not
+    /// been sent yet. A recalled one is appended to the history file when it
+    /// is finally sent.
+    stashed: Vec<String>,
 }
 
 impl Default for InputState {
@@ -61,6 +65,7 @@ impl InputState {
             history_file: None,
             pastes: Vec::new(),
             paste_seq: 0,
+            stashed: Vec::new(),
         }
     }
 
@@ -80,8 +85,10 @@ impl InputState {
 
     fn expand(&self, mut text: String) -> String {
         for (chip, content) in &self.pastes {
+            // Every copy of a chip expands, including one the user duplicated
+            // by copying it within the prompt.
             if text.contains(chip.as_str()) {
-                text = text.replacen(chip.as_str(), content, 1);
+                text = text.replace(chip.as_str(), content);
             }
         }
         text
@@ -95,11 +102,46 @@ impl InputState {
             .any(|(chip, _)| text.contains(chip.as_str()))
     }
 
+    /// Whether a chip marker was edited and no longer expands.
+    pub fn has_broken_paste(&self) -> bool {
+        let text = self.text();
+        self.pastes
+            .iter()
+            .any(|(chip, _)| !text.contains(chip.as_str()))
+    }
+
+    /// Whether the cursor is inside or at either edge of a collapsed paste.
+    fn cursor_in_paste(&self) -> bool {
+        let cursor = self.textarea.cursor();
+        let (row, col) = (cursor.0, cursor.1);
+        let text = self.text();
+        let mut offset = 0;
+        for (index, line) in text.split('\n').enumerate() {
+            if index == row {
+                offset += col;
+                break;
+            }
+            offset += line.chars().count() + 1;
+        }
+        self.pastes.iter().any(|(chip, _)| {
+            text.match_indices(chip.as_str()).any(|(byte, _)| {
+                let start = text[..byte].chars().count();
+                start <= offset && offset <= start + chip.chars().count()
+            })
+        })
+    }
+
     /// Insert pasted text at the cursor. A large paste becomes a chip like
     /// `[Pasted text #1 +120 lines]` so the rest of the draft stays visible;
     /// returns the chip when it collapsed.
     pub fn insert_paste(&mut self, text: &str) -> Option<String> {
-        let lines = text.trim_end_matches('\n').lines().count();
+        // A paste inside a chip would corrupt its marker; expand first.
+        if self.cursor_in_paste() {
+            self.expand_pastes();
+        }
+        // `lines()` already ignores the single trailing newline editors add;
+        // trailing blank lines are real rows and must count.
+        let lines = text.lines().count();
         if lines <= PASTE_COLLAPSE_LINES && text.chars().count() <= PASTE_COLLAPSE_CHARS {
             self.insert_text(text);
             return None;
@@ -127,6 +169,39 @@ impl InputState {
         let text = self.expanded_text();
         self.set_text(&text);
         true
+    }
+
+    /// Recover a chip whose marker was edited: replace the remaining marker
+    /// start on that line with the full text. Returns false when even the
+    /// marker start is gone.
+    pub fn repair_pastes(&mut self) -> bool {
+        let mut text = self.text();
+        let mut changed = false;
+        for (chip, content) in &self.pastes {
+            if text.contains(chip.as_str()) {
+                continue;
+            }
+            let start_marker = chip
+                .split_whitespace()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" ");
+            if start_marker.is_empty() {
+                continue;
+            }
+            if let Some(start) = text.find(&start_marker) {
+                let end = text[start..]
+                    .find('\n')
+                    .map(|offset| start + offset)
+                    .unwrap_or(text.len());
+                text.replace_range(start..end, content);
+                changed = true;
+            }
+        }
+        if changed {
+            self.set_text(&text);
+        }
+        changed
     }
 
     pub fn take(&mut self) -> String {
@@ -168,7 +243,20 @@ impl InputState {
         if text.trim().is_empty() {
             return;
         }
-        if self.history.last().map(String::as_str) != Some(text) {
+        // A stashed draft was never written to the file. Sending it later
+        // must append it even though it is already the newest in-memory
+        // entry, or it disappears after a restart.
+        let was_stashed = self
+            .stashed
+            .iter()
+            .position(|entry| entry == text)
+            .map(|index| self.stashed.remove(index))
+            .is_some();
+        if was_stashed {
+            // It is already the newest in-memory entry, but the file never
+            // saw it. Do not add an adjacent duplicate.
+            self.append_history_file(text);
+        } else if self.history.last().map(String::as_str) != Some(text) {
             self.history.push(text.to_string());
             if self.history.len() > HISTORY_LIMIT {
                 self.history.remove(0);
@@ -180,15 +268,32 @@ impl InputState {
     /// Keep a discarded draft one Up away for this run, without writing it
     /// to the history file (it was never sent).
     pub fn stash_in_history(&mut self, text: &str) {
-        if text.trim().is_empty() || self.history.last().map(String::as_str) == Some(text) {
+        self.stash_impl(text, true);
+    }
+
+    /// Like [`InputState::stash_in_history`], but the draft saved by history
+    /// browsing survives so Ctrl+R can be cancelled without losing it.
+    pub fn stash_in_history_keep_draft(&mut self, text: &str) {
+        self.stash_impl(text, false);
+    }
+
+    fn stash_impl(&mut self, text: &str, clear_draft: bool) {
+        if text.trim().is_empty() {
             return;
         }
-        self.history.push(text.to_string());
-        if self.history.len() > HISTORY_LIMIT {
-            self.history.remove(0);
+        if self.history.last().map(String::as_str) != Some(text) {
+            self.history.push(text.to_string());
+            if self.history.len() > HISTORY_LIMIT {
+                self.history.remove(0);
+            }
+            self.stashed.push(text.to_string());
         }
+        // The cleared line is no longer a browsing position, even when the
+        // text was already the newest entry.
         self.history_index = None;
-        self.draft.clear();
+        if clear_draft {
+            self.draft.clear();
+        }
     }
 
     /// Load prompt history from `path` (JSON-lines of strings, newest last)
@@ -245,21 +350,42 @@ impl InputState {
 
     /// Whether Up should go further back in history: the prompt is empty, or
     /// it still holds the unedited entry Up recalled and the cursor is on its
-    /// first row.
+    /// first *visual* row (a long line soft-wraps into several).
     pub fn walks_history_up(&self) -> bool {
-        self.is_empty() || (self.on_recalled_entry() && self.textarea.cursor().0 == 0)
+        self.is_empty() || (self.on_recalled_entry() && self.first_screen_row())
     }
 
-    /// Down's mirror of [`InputState::walks_history_up`]: on the last row of
-    /// an unedited recalled entry.
+    /// Down's mirror of [`InputState::walks_history_up`]: on the last visual
+    /// row of an unedited recalled entry.
     pub fn walks_history_down(&self) -> bool {
-        self.on_recalled_entry() && self.textarea.cursor().0 + 1 >= self.textarea.lines().len()
+        self.on_recalled_entry() && self.last_screen_row()
     }
 
-    fn on_recalled_entry(&self) -> bool {
+    fn first_screen_row(&self) -> bool {
+        self.textarea.screen_cursor().row == 0
+    }
+
+    fn last_screen_row(&self) -> bool {
+        // The textarea knows the display rows after it is drawn. Probe the
+        // end of the text to find the last one without disturbing this cursor.
+        let mut probe = self.textarea.clone();
+        probe.move_cursor(CursorMove::Bottom);
+        self.textarea.screen_cursor().row >= probe.screen_cursor().row
+    }
+
+    /// Whether the prompt still holds an unedited entry recalled from
+    /// history. The hidden `draft` belongs to that browsing position.
+    pub fn on_recalled_entry(&self) -> bool {
         self.history_index
             .and_then(|index| self.history.get(index))
             .is_some_and(|entry| *entry == self.text())
+    }
+
+    /// Fill the prompt from the history picker and mark the entry as recalled,
+    /// so Down can restore the draft saved before browsing.
+    pub fn fill_history_entry(&mut self, text: &str) {
+        self.set_text(text);
+        self.history_index = self.history.iter().rposition(|entry| entry == text);
     }
 
     pub fn history_prev(&mut self) -> bool {
@@ -305,13 +431,27 @@ impl InputState {
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        // Editing a chip would leave a marker that no longer expands. Put the
+        // full text back first, then apply the key to it.
+        let edits = matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
+            || (matches!(key.code, KeyCode::Char(_)) && !ctrl && !alt);
+        if edits && self.cursor_in_paste() {
+            self.expand_pastes();
+        }
         if ctrl && matches!(key.code, KeyCode::Char('j') | KeyCode::Char('J')) {
             self.insert_newline();
             return true;
         }
         if ctrl && matches!(key.code, KeyCode::Char('u') | KeyCode::Char('U')) {
             self.reset_completion();
-            return self.textarea.delete_line_by_head();
+            // Readline C-u at the start of a line kills nothing; the textarea
+            // would join it to the previous line instead.
+            return if self.textarea.cursor().1 == 0 {
+                true
+            } else {
+                self.textarea.delete_line_by_head()
+            };
         }
         if ctrl && matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z')) {
             self.reset_completion();
@@ -320,6 +460,10 @@ impl InputState {
             } else {
                 self.textarea.undo()
             };
+        }
+        if alt && matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z')) {
+            self.reset_completion();
+            return self.textarea.redo();
         }
         // Ctrl+_ arrives as Ctrl+_, Ctrl+-, or Ctrl+7 depending on the
         // terminal.
@@ -627,6 +771,92 @@ mod tests {
         assert!(input.expand_pastes());
         assert_eq!(input.text(), "x".repeat(1500));
         assert!(!input.expand_pastes());
+    }
+
+    #[test]
+    fn editing_a_chip_expands_it_and_repairs_a_broken_marker() {
+        let mut input = InputState::new();
+        let body: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+        let chip = input.insert_paste(&body).expect("collapsed");
+        let inside = chip.chars().count() - 1;
+        input
+            .textarea
+            .move_cursor(CursorMove::Jump(0, inside as u16));
+        input.handle_key(key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(input.text().contains("line 20"), "{}", input.text());
+        assert!(!input.has_collapsed_paste());
+
+        // A marker damaged outside the editor's key path is repaired on
+        // submit instead of being sent literally.
+        let mut broken = InputState::new();
+        let chip = broken.insert_paste(&body).expect("collapsed");
+        broken.textarea.move_cursor(CursorMove::End);
+        broken
+            .textarea
+            .input(key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert!(broken.has_broken_paste());
+        assert!(broken.repair_pastes());
+        assert!(broken.text().contains("line 20"), "{}", broken.text());
+        assert!(!broken.text().contains(&chip));
+    }
+
+    #[test]
+    fn a_stashed_draft_is_written_when_it_is_finally_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompt_history.jsonl");
+        let mut input = InputState::new();
+        input.attach_history_file(path.clone());
+        input.set_text("a draft");
+        input.stash_in_history("a draft");
+        input.set_text("");
+        assert!(input.history_prev());
+        assert_eq!(input.text(), "a draft");
+        assert_eq!(input.submit(true).as_deref(), Some("a draft"));
+
+        let mut second = InputState::new();
+        second.attach_history_file(path);
+        assert!(second.history_prev());
+        assert_eq!(second.text(), "a draft");
+    }
+
+    #[test]
+    fn ctrl_u_at_the_start_of_a_line_does_nothing() {
+        let mut input = InputState::new();
+        input.set_text("one\ntwo");
+        input.textarea.move_cursor(CursorMove::Jump(1, 0));
+        input.handle_key(key(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(input.text(), "one\ntwo");
+        input.textarea.move_cursor(CursorMove::Jump(1, 1));
+        input.handle_key(key(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(input.text(), "one\nwo");
+    }
+
+    #[test]
+    fn wrapped_history_walks_by_visual_row() {
+        let mut input = InputState::new();
+        let long = "word ".repeat(30);
+        for text in ["oldest", long.as_str(), "newest"] {
+            input.set_text(text);
+            input.submit(true).unwrap();
+        }
+        assert!(input.history_prev());
+        assert_eq!(input.text(), "newest");
+        assert!(input.history_prev());
+        assert_eq!(input.text(), long);
+        input.fit_viewport(20, 6);
+        assert!(
+            !input.walks_history_up(),
+            "the cursor starts on the last row"
+        );
+        // Up moves within the wrapped entry, not to older history.
+        input.handle_key(key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(input.text(), long);
+        for _ in 0..40 {
+            input.handle_key(key(KeyCode::Up, KeyModifiers::NONE));
+        }
+        assert!(input.walks_history_up(), "the cursor reached the first row");
+        assert!(input.history_prev());
+        assert_eq!(input.text(), "oldest");
     }
 
     #[test]

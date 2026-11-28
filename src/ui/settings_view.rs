@@ -3,6 +3,8 @@
 //! headings, what the highlighted key does below, and the keys that drive it
 //! at the bottom. Typing searches every tab at once.
 
+use std::cell::Cell;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::Modifier;
@@ -122,6 +124,9 @@ pub struct SettingsModal {
     pub filter: String,
     /// The global config file, shown in the Files tab.
     pub config_path: String,
+    /// The last render found the terminal too small; keys other than Esc are
+    /// ignored so they cannot act on an invisible screen.
+    pub too_small: Cell<bool>,
 }
 
 impl SettingsModal {
@@ -250,8 +255,19 @@ impl SettingsModal {
 pub fn render(frame: &mut Frame, view: &SettingsModal, area: Rect, theme: &Theme) {
     let rect = area;
     if rect.width < 30 || rect.height < 10 {
+        // Never leave an invisible modal capturing keys. Say why, and let
+        // the key handler ignore everything but Esc.
+        view.too_small.set(true);
+        frame.render_widget(Clear, rect);
+        let message = "Settings needs at least 30×10; enlarge the terminal (Esc closes)";
+        frame.render_widget(
+            Paragraph::new(clip_end(message, rect.width as usize))
+                .style(theme.style(Role::Warning)),
+            rect,
+        );
         return;
     }
+    view.too_small.set(false);
     frame.render_widget(Clear, rect);
     let block = WidgetBlock::default()
         .borders(Borders::ALL)
@@ -470,15 +486,29 @@ fn tabs_line(view: &SettingsModal, width: usize, theme: &Theme) -> Line<'static>
     }
     let mut spans = Vec::new();
     let mut used = 0usize;
+    let mut active_shown = false;
     for (index, tab) in TABS.iter().enumerate() {
         let label = format!(" {tab} ");
         let label_width = UnicodeWidthStr::width(label.as_str()) + 1;
         if used + label_width > width {
-            spans.push(Span::styled("…", theme.style(Role::Muted)));
+            if !active_shown && view.tab >= index {
+                // The strip does not fit before the active tab; keep the
+                // active tab visible instead of ending on an ellipsis.
+                let active = TABS.get(view.tab).copied().unwrap_or("");
+                spans.clear();
+                spans.push(Span::styled("… ", theme.style(Role::Muted)));
+                spans.push(Span::styled(
+                    format!(" {active} "),
+                    theme.bold(Role::Bg).bg(theme.color(Role::Accent)),
+                ));
+            } else {
+                spans.push(Span::styled("…", theme.style(Role::Muted)));
+            }
             break;
         }
         used += label_width;
         if index == view.tab {
+            active_shown = true;
             spans.push(Span::styled(
                 label,
                 theme.bold(Role::Bg).bg(theme.color(Role::Accent)),
@@ -506,6 +536,35 @@ mod tests {
             about: format!("about {key}"),
             action: PickAction::Run(format!("/settings {key}")),
         }
+    }
+
+    #[test]
+    fn the_active_tab_stays_visible_on_a_narrow_strip() {
+        let theme = Theme::bundled("default");
+        let view = SettingsModal {
+            tab: TABS.len() - 1,
+            ..SettingsModal::default()
+        };
+        let line = tabs_line(&view, 40, &theme);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("Files"), "{text}");
+    }
+
+    #[test]
+    fn a_tiny_terminal_marks_the_view_too_small() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let theme = Theme::bundled("default");
+        let view = SettingsModal::default();
+        let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &view, frame.area(), &theme))
+            .unwrap();
+        assert!(view.too_small.get());
     }
 
     #[test]
